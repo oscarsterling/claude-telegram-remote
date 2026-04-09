@@ -1,0 +1,6 @@
+*.pid
+*.log
+cache/
+node_modules/
+.env
+.env.local

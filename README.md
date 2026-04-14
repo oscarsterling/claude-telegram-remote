@@ -1,6 +1,8 @@
 # claude-telegram-remote
 
-**v2.0** — Control Claude Code from your phone via Telegram. Six pieces that turn a terminal-only AI into a mobile-first assistant, with a typing indicator, a deterministic Stop-hook, and five new slash commands.
+**v2.1** (April 14, 2026). Control Claude Code from your phone via Telegram. Six pieces that turn a terminal-only AI into a mobile-first assistant, with a typing indicator, a deterministic Stop-hook, five new slash commands, and now a wake-ping so the new Claude announces himself after a manual `!restart`.
+
+> Two updates shipped same day: v2.0 in the morning (typing indicator + Stop-hook rewrite + five new commands), then v2.1 in the afternoon (wake-ping pattern for `!restart`).
 
 ![Hero](assets/hero.png)
 
@@ -264,11 +266,14 @@ Pattern:
 
 1. `cmd_restart()` writes two files: the restart trigger **and** a "manual flag" file (e.g. `restart-manual-flag`).
 2. Your restart script runs its normal steps, verifies the new session is ready, then checks for the manual flag.
-3. If the flag exists, sleep ~10 seconds (buffer so `/reset` finishes), then `tmux send-keys` a short prompt like:
-   ```
-   You just rebooted via manual /reset. Reply in DM: "Awake. Session ready." with current time.
+3. If the flag exists, sleep ~10 seconds (buffer so `/reset` finishes), then `tmux send-keys` a short wake prompt. Example:
+   ```bash
+   WAKE_PROMPT='You just rebooted via manual /reset. Reply in DM: "Awake. Session ready." with current time. Nothing else.'
+   tmux send-keys -t "$TMUX_SESSION" "$WAKE_PROMPT" Enter
    ```
 4. Delete the flag.
+
+**Customize the ping.** The wake prompt is just a string in your restart script, so you can make it anything: have Claude report system health, read the last few inbox items, sanity-check a cron, or just say hi with a specific tone. Keep it short (one to two sentences) so the first turn doesn't eat context.
 
 Nightly cron restarts never create the flag, so scheduled resets stay silent. Only `!restart` (manual) triggers the ping.
 

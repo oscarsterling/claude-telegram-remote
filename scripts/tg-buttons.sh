@@ -5,7 +5,7 @@
 # "pick" shorthand generates 1/2/3/Ignore buttons with a unique ID.
 #
 # Examples:
-#   tg-buttons.sh 8302078563 "Pick a reply:" smr pick
+#   tg-buttons.sh 123456789 "Pick a reply:" smr pick
 #   -> Buttons: 1, 2, 3, Ignore (each with unique callback data)
 
 CHAT_ID="$1"

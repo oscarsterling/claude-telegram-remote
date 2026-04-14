@@ -1,12 +1,22 @@
 #!/usr/bin/env python3
 """Telegram Commander - Remote control Claude Code via ! commands from Telegram."""
-import json, logging, os, signal, subprocess, sys, time, inspect
-import urllib.error, urllib.request
+import inspect
+import json
+import logging
+import os
+import signal
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
 
 # === CONFIGURE THESE ===
 YOUR_USER_ID = 0  # Your Telegram user ID (get it from @userinfobot)
-TMUX_SESSION = "claude"  # Your tmux session name
-TMUX_PATH = "/opt/homebrew/bin/tmux"  # Path to tmux (run `which tmux` to find yours)
+TMUX_SESSION = "claude"  # Your tmux session name where Claude Code runs
+TMUX_PATH = "/opt/homebrew/bin/tmux"  # `which tmux` to find yours
+RESTART_SCRIPT = ""  # Optional: absolute path to your restart script (leave "" to disable !restart)
+HEALTH_SCRIPT = ""  # Optional: absolute path to a health-check script (leave "" to disable !health)
 # =======================
 
 PID_FILE = os.path.expanduser("~/claude-telegram-remote/commander.pid")
@@ -53,10 +63,56 @@ def reply(token, chat_id, text):
     telegram_api(token, "sendMessage", {"chat_id": chat_id, "text": text})
 
 
+def send_buttons(token, chat_id, text, buttons_json):
+    """Send a message with inline keyboard buttons via the Commander bot itself."""
+    telegram_api(token, "sendMessage", {
+        "chat_id": chat_id,
+        "text": text,
+        "reply_markup": {"inline_keyboard": buttons_json}
+    })
+
+
 def find_claude_pid():
     r = subprocess.run(["pgrep", "-f", "claude.*--channels"], capture_output=True, text=True)
     pids = r.stdout.strip().split("\n") if r.stdout.strip() else []
     return pids[0] if pids and pids[0] else None
+
+
+def cmd_ping():
+    return "Pong"
+
+
+def cmd_status():
+    pid = find_claude_pid()
+    if not pid:
+        return "Claude is NOT running."
+    lines = [f"Claude is running (PID {pid})"]
+    ps = subprocess.run(["ps", "-o", "etime=", "-p", pid], capture_output=True, text=True)
+    if ps.stdout.strip():
+        lines.append(f"Uptime: {ps.stdout.strip()}")
+    return "\n".join(lines)
+
+
+def cmd_stop():
+    pid = find_claude_pid()
+    if not pid:
+        return "No Claude process found."
+    try:
+        os.kill(int(pid), signal.SIGINT)
+        return f"Sent SIGINT to PID {pid}. Claude is waiting for input."
+    except OSError as e:
+        return f"Failed to stop PID {pid}: {e}"
+
+
+def cmd_restart():
+    if not RESTART_SCRIPT:
+        return "No RESTART_SCRIPT configured. Set RESTART_SCRIPT in telegram-commander.py."
+    try:
+        subprocess.Popen(["bash", RESTART_SCRIPT],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return "Session restarting. Give it 30 seconds."
+    except Exception as e:
+        return f"Restart failed: {e}"
 
 
 def inject_slash_command(slash_cmd):
@@ -94,8 +150,7 @@ def read_current_mode():
             [TMUX_PATH, "capture-pane", "-t", TMUX_SESSION, "-p"],
             capture_output=True, text=True, timeout=5)
         if r.returncode == 0:
-            lines = r.stdout.strip().split("\n")
-            for line in reversed(lines):
+            for line in reversed(r.stdout.strip().split("\n")):
                 low = line.lower()
                 if "shift+tab to cycle" in low or "permissions" in low:
                     if "bypass" in low:
@@ -112,45 +167,16 @@ def read_current_mode():
         return "unknown"
 
 
-# === COMMANDS ===
-
-def cmd_ping():
-    return "Pong"
-
-
-def cmd_status():
-    pid = find_claude_pid()
-    if not pid:
-        return "Claude is NOT running."
-    lines = [f"Claude is running (PID {pid})"]
-    ps = subprocess.run(["ps", "-o", "etime=", "-p", pid], capture_output=True, text=True)
-    if ps.stdout.strip():
-        lines.append(f"Uptime: {ps.stdout.strip()}")
-    return "\n".join(lines)
-
-
-def cmd_stop():
-    pid = find_claude_pid()
-    if not pid:
-        return "No Claude process found."
-    try:
-        os.kill(int(pid), signal.SIGINT)
-        return f"Sent SIGINT to PID {pid}. Claude is waiting for input."
-    except OSError as e:
-        return f"Failed to stop PID {pid}: {e}"
-
-
-def cmd_restart():
-    """Restart Claude Code session. Customize the restart script path."""
-    return "Restart not configured. Set RESTART_SCRIPT path in the config section."
+def _no_session_msg():
+    return f"No tmux session '{TMUX_SESSION}' found. Is Claude running in tmux?"
 
 
 def cmd_plan():
     result = inject_slash_command("/plan")
     if result == "sent":
-        return "Sent /plan to tmux session."
+        return "Sent /plan."
     if result == "no_session":
-        return f"No tmux session '{TMUX_SESSION}' found. Is Claude running in tmux?"
+        return _no_session_msg()
     return f"Failed: {result}"
 
 
@@ -161,25 +187,25 @@ def cmd_mode():
         mode = read_current_mode()
         return f"Cycled mode (Shift+Tab). Current: {mode}"
     if result == "no_session":
-        return f"No tmux session '{TMUX_SESSION}' found. Is Claude running in tmux?"
+        return _no_session_msg()
     return f"Failed: {result}"
 
 
 def cmd_compact():
     result = inject_slash_command("/compact")
     if result == "sent":
-        return "Sent /compact to tmux session."
+        return "Sent /compact."
     if result == "no_session":
-        return f"No tmux session '{TMUX_SESSION}' found."
+        return _no_session_msg()
     return f"Failed: {result}"
 
 
 def cmd_clear():
     result = inject_slash_command("/clear")
     if result == "sent":
-        return "Sent /clear to tmux session. Fresh conversation."
+        return "Sent /clear. Fresh conversation."
     if result == "no_session":
-        return f"No tmux session '{TMUX_SESSION}' found."
+        return _no_session_msg()
     return f"Failed: {result}"
 
 
@@ -202,7 +228,7 @@ def cmd_model(args=""):
     if result == "sent":
         return f"Switched to {model}."
     if result == "no_session":
-        return f"No tmux session '{TMUX_SESSION}' found."
+        return _no_session_msg()
     return f"Failed: {result}"
 
 
@@ -211,7 +237,7 @@ def cmd_opus():
     if result == "sent":
         return "Switched to Opus (1M context)."
     if result == "no_session":
-        return f"No tmux session '{TMUX_SESSION}' found."
+        return _no_session_msg()
     return f"Failed: {result}"
 
 
@@ -220,8 +246,47 @@ def cmd_sonnet():
     if result == "sent":
         return "Switched to Sonnet."
     if result == "no_session":
-        return f"No tmux session '{TMUX_SESSION}' found."
+        return _no_session_msg()
     return f"Failed: {result}"
+
+
+def cmd_cost():
+    result = inject_slash_command("/cost")
+    if result == "sent":
+        return "Sent /cost."
+    if result == "no_session":
+        return _no_session_msg()
+    return f"Failed: {result}"
+
+
+def cmd_effort(args=""):
+    level = args.strip().lower() if args else ""
+    valid_levels = {"max", "high", "medium", "auto"}
+    if level in valid_levels:
+        result = inject_slash_command(f"/effort {level}")
+        if result == "sent":
+            return f"Set effort to {level}."
+        if result == "no_session":
+            return _no_session_msg()
+        return f"Failed: {result}"
+    return "picker"
+
+
+def cmd_health():
+    if not HEALTH_SCRIPT:
+        return "No HEALTH_SCRIPT configured. Set HEALTH_SCRIPT in telegram-commander.py."
+    try:
+        r = subprocess.run(
+            ["bash", HEALTH_SCRIPT, "check", "--quiet"],
+            capture_output=True, text=True, timeout=30)
+        output = r.stdout.strip()
+        if not output:
+            return "All systems healthy."
+        return output
+    except subprocess.TimeoutExpired:
+        return "Health check timed out."
+    except Exception as e:
+        return f"Health check failed: {e}"
 
 
 COMMANDS = {
@@ -230,6 +295,7 @@ COMMANDS = {
     "!plan": cmd_plan, "!mode": cmd_mode, "!compact": cmd_compact,
     "!clear": cmd_clear, "!model": cmd_model,
     "!opus": cmd_opus, "!sonnet": cmd_sonnet,
+    "!effort": cmd_effort, "!health": cmd_health, "!cost": cmd_cost,
 }
 
 
@@ -241,13 +307,9 @@ def handle_signal(signum, frame):
 
 def main():
     if YOUR_USER_ID == 0:
-        print("ERROR: Set YOUR_USER_ID in the script before running.")
-        print("Get your Telegram user ID from @userinfobot")
+        sys.stderr.write("ERROR: Set YOUR_USER_ID at the top of telegram-commander.py.\n")
         sys.exit(1)
-
-    os.makedirs(os.path.dirname(PID_FILE), exist_ok=True)
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
-
     logging.basicConfig(
         filename=LOG_FILE, level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
@@ -255,6 +317,7 @@ def main():
     logging.info("Telegram Commander starting")
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGCHLD, signal.SIG_IGN)
 
     token = get_bot_token()
     with open(PID_FILE, "w") as f:
@@ -267,7 +330,7 @@ def main():
             result = telegram_api(token, "getUpdates", {
                 "offset": last_update_id + 1,
                 "timeout": POLL_TIMEOUT,
-                "allowed_updates": ["message"]
+                "allowed_updates": ["message", "callback_query"]
             })
             if result is None or not result.get("ok"):
                 logging.warning("API issue, retrying in %ds: %s", RETRY_DELAY, result)
@@ -277,6 +340,37 @@ def main():
             for update in result.get("result", []):
                 update_id = update["update_id"]
                 last_update_id = max(last_update_id, update_id)
+
+                cb = update.get("callback_query")
+                if cb:
+                    cb_id = cb["id"]
+                    data = cb.get("data", "")
+                    cb_chat_id = cb.get("message", {}).get("chat", {}).get("id", 0)
+                    cb_msg_id = cb.get("message", {}).get("message_id", 0)
+                    cb_user_id = cb.get("from", {}).get("id", 0)
+                    if cb_user_id == YOUR_USER_ID and data.startswith("effort:"):
+                        level = data.split(":", 1)[1]
+                        tmux_result = inject_slash_command(f"/effort {level}")
+                        if tmux_result == "sent":
+                            telegram_api(token, "answerCallbackQuery", {
+                                "callback_query_id": cb_id,
+                                "text": f"Effort set to {level}"
+                            })
+                            telegram_api(token, "editMessageText", {
+                                "chat_id": cb_chat_id,
+                                "message_id": cb_msg_id,
+                                "text": f"Effort: {level}"
+                            })
+                        else:
+                            telegram_api(token, "answerCallbackQuery", {
+                                "callback_query_id": cb_id,
+                                "text": f"Failed: {tmux_result}"
+                            })
+                        logging.info("Callback effort:%s -> %s", level, tmux_result)
+                    else:
+                        telegram_api(token, "answerCallbackQuery", {"callback_query_id": cb_id})
+                    continue
+
                 msg = update.get("message")
                 if not msg:
                     continue
@@ -304,7 +398,19 @@ def main():
                 else:
                     available = ", ".join(sorted(COMMANDS.keys()))
                     response = f"Unknown command: {cmd_key}\nAvailable: {available}"
-                reply(token, chat_id, response)
+
+                if response == "picker":
+                    try:
+                        send_buttons(token, chat_id, "Set effort level:", [
+                            [{"text": "Max", "callback_data": "effort:max"},
+                             {"text": "High", "callback_data": "effort:high"}],
+                            [{"text": "Medium", "callback_data": "effort:medium"},
+                             {"text": "Auto", "callback_data": "effort:auto"}]
+                        ])
+                    except Exception as e:
+                        reply(token, chat_id, f"Button send failed: {e}")
+                else:
+                    reply(token, chat_id, response)
                 logging.info("Replied to %s: %s", cmd_key, response[:80])
     finally:
         try:

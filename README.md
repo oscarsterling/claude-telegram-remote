@@ -1,6 +1,6 @@
 # claude-telegram-remote
 
-Control Claude Code from your phone via Telegram. Five pieces that turn a terminal-only AI into a mobile-first assistant.
+**v2.0** — Control Claude Code from your phone via Telegram. Six pieces that turn a terminal-only AI into a mobile-first assistant, with a typing indicator, a deterministic Stop-hook, and five new slash commands.
 
 ![Hero](assets/hero.png)
 
@@ -10,30 +10,45 @@ A set of scripts and configurations that give you full remote control of Claude 
 
 **[Read the full story on Clelp.ai](https://clelp.ai/blog/claude-telegram-remote-control)**
 
-## The Five Pieces
+## What's New in v2
+
+- **Typing indicator pinger** — Telegram now shows "Claude is typing..." the entire time he's working, just like a real chat. Spawns on inbound, dies on reply, hard 10-min ceiling.
+- **Deterministic Stop hook** — Replaces the old LLM-judge with a Python script that walks the actual transcript. Catches both "missing TG reply" AND "trailing terminal text after the reply" (the silent killer).
+- **Five new commands** — `!ping`, `!reset`, `!effort`, `!health`, `!cost`
+- **Inline button picker** — `!effort` with no argument pops up a Max/High/Medium/Auto button picker via callback queries.
+- **Optional health check hook** — Wire your own health-check script into `!health`.
+
+## The Six Pieces
 
 | # | Piece | What It Does |
 |---|-------|-------------|
 | 1 | **Conversation Layer** | Anthropic's Telegram MCP plugin. Claude receives and sends messages via Telegram. |
 | 2 | **Message Cache** | Hooks that log all messages per chat. Gives Claude thread context across sessions. |
-| 3 | **Command Daemon** | Background service that watches for `!commands` and injects them into Claude Code's tmux session. |
-| 4 | **Notification Fix** | Stop hook that ensures Claude always replies via Telegram, not just to the terminal. |
-| 5 | **Proactive Messaging** | Shell scripts for cron notifications and interactive inline keyboard buttons. |
+| 3 | **Command Daemon** | Background service that watches for `!commands` and injects them into Claude Code's tmux session. Now with inline-button callbacks. |
+| 4 | **Stop Hook** | Deterministic Python check. Blocks if Claude got a TG message and didn't reply, OR if he wrote terminal text after the final reply. |
+| 5 | **Typing Pinger** | Spawns a `sendChatAction(typing)` loop on inbound, killed on reply. Single-instance per chat. |
+| 6 | **Proactive Messaging** | Shell scripts for cron notifications and interactive inline keyboard buttons. |
 
 ## Commands
 
 | Command | What It Does |
 |---------|-------------|
-| `!status` | What Claude is working on right now |
-| `!stop` | Send SIGINT to stop the current task |
+| `!ping` | Health check, replies "Pong" |
+| `!status` | What Claude is working on right now (PID + uptime) |
+| `!stop` | Send SIGINT to interrupt the current task |
 | `!plan` | Switch to plan mode before acting |
-| `!restart` | Restart the Claude Code session |
-| `!mode` | Cycle permission modes (Shift+Tab) |
+| `!restart` / `!reset` | Restart the Claude Code session (requires `RESTART_SCRIPT` config) |
+| `!mode` | Cycle permission modes (Shift+Tab) and report the current one |
 | `!opus` | Switch to Opus (1M context) |
 | `!sonnet` | Switch to Sonnet (faster) |
-| `!model` | Show current model |
+| `!model [name]` | Show current model, or switch to a specific one |
 | `!clear` | Clear conversation context |
 | `!compact` | Compact the conversation |
+| `!cost` | Show current session cost |
+| `!effort [max\|high\|medium\|auto]` | Set thinking effort level (no arg = button picker) |
+| `!health` | Run your custom health check script (requires `HEALTH_SCRIPT` config) |
+
+Both `!command` and `/command` syntax work, since some Telegram clients auto-complete `/`.
 
 ## Prerequisites
 
@@ -62,7 +77,15 @@ On macOS, store the command bot token in Keychain:
 security add-generic-password -a clawdbot -s telegram-commander-bot-token -w "YOUR_COMMAND_BOT_TOKEN"
 ```
 
-The conversation bot token is configured in Claude Code's Telegram MCP plugin settings.
+Store the conversation bot token where the typing pinger can read it:
+
+```bash
+mkdir -p ~/.claude/channels/telegram
+echo 'TELEGRAM_BOT_TOKEN=YOUR_CONVERSATION_BOT_TOKEN' > ~/.claude/channels/telegram/.env
+chmod 600 ~/.claude/channels/telegram/.env
+```
+
+The conversation bot token is also configured in Claude Code's Telegram MCP plugin settings.
 
 ### Step 3: Get Your Telegram User ID
 
@@ -82,16 +105,26 @@ In Claude Code, enable the Telegram plugin:
 
 ### Step 5: Configure the Command Daemon
 
-Edit `scripts/telegram-commander.py`:
+Edit `scripts/telegram-commander.py` and set the values in the `=== CONFIGURE THESE ===` block:
 
-- Set `YOUR_USER_ID` to your Telegram user ID
-- Set `TMUX_SESSION` to your tmux session name
+- `YOUR_USER_ID` — your Telegram user ID
+- `TMUX_SESSION` — your tmux session name (default: `claude`)
+- `TMUX_PATH` — output of `which tmux`
+- `RESTART_SCRIPT` — optional, absolute path to your restart script (or leave `""` to disable `!restart`)
+- `HEALTH_SCRIPT` — optional, absolute path to your health check script (or leave `""` to disable `!health`)
 
 ### Step 6: Install the Hooks
 
-Copy the hook configurations into your Claude Code settings:
+Copy this repo to `~/claude-telegram-remote/` (the hook scripts assume that path):
 
-**Message Cache (UserPromptSubmit hook):**
+```bash
+git clone https://github.com/oscarsterling/claude-telegram-remote ~/claude-telegram-remote
+chmod +x ~/claude-telegram-remote/hooks/*.sh
+chmod +x ~/claude-telegram-remote/hooks/*.py
+```
+
+Then add the hook configuration to your Claude Code `settings.json`:
+
 ```json
 {
   "hooks": {
@@ -101,8 +134,14 @@ Copy the hook configurations into your Claude Code settings:
         "hooks": [
           {
             "type": "command",
-            "command": "bash /path/to/hooks/cache-telegram-inbound.sh",
+            "command": "bash ~/claude-telegram-remote/hooks/cache-telegram-inbound.sh",
             "timeout": 10,
+            "async": true
+          },
+          {
+            "type": "command",
+            "command": "bash ~/claude-telegram-remote/hooks/start-typing-pinger.sh",
+            "timeout": 5,
             "async": true
           }
         ]
@@ -114,8 +153,14 @@ Copy the hook configurations into your Claude Code settings:
         "hooks": [
           {
             "type": "command",
-            "command": "bash /path/to/hooks/cache-telegram-outbound.sh",
+            "command": "bash ~/claude-telegram-remote/hooks/cache-telegram-outbound.sh",
             "timeout": 10,
+            "async": true
+          },
+          {
+            "type": "command",
+            "command": "bash ~/claude-telegram-remote/hooks/stop-typing-pinger.sh",
+            "timeout": 5,
             "async": true
           }
         ]
@@ -125,9 +170,15 @@ Copy the hook configurations into your Claude Code settings:
       {
         "hooks": [
           {
-            "type": "prompt",
-            "prompt": "Check if the model's LAST turn included a Telegram channel message. If it received a Telegram message but did NOT call the Telegram reply tool, output BLOCK. Otherwise output PASS.",
-            "timeout": 15
+            "type": "command",
+            "command": "python3 ~/claude-telegram-remote/hooks/check-tg-reply-completeness.py",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "bash ~/claude-telegram-remote/hooks/stop-typing-pinger.sh",
+            "timeout": 5,
+            "async": true
           }
         ]
       }
@@ -140,10 +191,10 @@ Copy the hook configurations into your Claude Code settings:
 
 ```bash
 # Test it first
-python3 scripts/telegram-commander.py
+python3 ~/claude-telegram-remote/scripts/telegram-commander.py
 
 # Run as a launchd service (macOS)
-cp services/com.claude.telegram-commander.plist ~/Library/LaunchAgents/
+cp ~/claude-telegram-remote/services/com.claude.telegram-commander.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.claude.telegram-commander.plist
 ```
 
@@ -161,38 +212,47 @@ Send `!ping` from your command bot. If you get `Pong`, you're live.
 ```
 claude-telegram-remote/
   scripts/
-    telegram-commander.py    # Command daemon
-    tg-send.sh               # Proactive plain text messaging
-    tg-buttons.sh            # Proactive inline keyboard buttons
+    telegram-commander.py            # Command daemon (15 commands + button callbacks)
+    tg-send.sh                       # Proactive plain text messaging
+    tg-buttons.sh                    # Proactive inline keyboard buttons
   hooks/
-    cache-telegram-inbound.sh   # Message cache (inbound)
-    cache-telegram-outbound.sh  # Message cache (outbound)
+    cache-telegram-inbound.sh        # Message cache (inbound)
+    cache-telegram-outbound.sh       # Message cache (outbound)
+    start-typing-pinger.sh           # Spawns the typing pinger on inbound TG
+    stop-typing-pinger.sh            # Kills any running typing pingers
+    typing-indicator-pinger.py       # Loops sendChatAction(typing) until killed
+    check-tg-reply-completeness.py   # Deterministic Stop hook
   services/
     com.claude.telegram-commander.plist  # macOS launchd config
-  examples/
-    settings-hooks.json      # Example Claude Code hook configuration
   assets/
-    hero.png                 # Project hero image
+    hero.png                         # Project hero image
 ```
 
 ## How It Works
 
-The command daemon is a Python process that long-polls the Telegram Bot API for messages from your command bot. When it sees a message starting with `!`, it maps it to an action:
+**Command daemon.** A Python process long-polls the Telegram Bot API for messages from your command bot. When it sees a message starting with `!` or `/`, it maps it to an action:
+- Slash commands (`!plan`, `!clear`, `!compact`, `!cost`): injected as keystrokes into tmux via `tmux send-keys`
+- Raw keys (`!mode`): sent as special key names (e.g., `BTab` for Shift+Tab)
+- Process control (`!stop`, `!restart`): direct signal/subprocess calls
+- Inline pickers (`!effort` with no arg): sends inline keyboard buttons; the daemon also handles the callback_query taps
 
-- **Slash commands** (`!plan`, `!clear`, `!compact`): Injected as keystrokes into tmux via `tmux send-keys`
-- **Raw keys** (`!mode`): Sent as special key names (e.g., `BTab` for Shift+Tab)
-- **Process control** (`!stop`, `!restart`): Direct signal/subprocess calls
+**Message cache hooks.** Fire on every prompt submission and every Telegram reply, logging both sides of the conversation to JSONL files organized by chat ID.
 
-The message cache hooks fire on every prompt submission and every Telegram reply, logging both sides of the conversation to JSONL files organized by chat ID.
+**Typing pinger.** When a Telegram message arrives, `start-typing-pinger.sh` extracts the chat_id from the inbound channel tag and spawns `typing-indicator-pinger.py` as a detached process. The pinger loops `sendChatAction(typing)` every 4 seconds (Telegram clears typing after ~5s, so this keeps it lit). It dies in three ways: PostToolUse on the reply tool, the Stop hook backstop, or the hard 10-minute ceiling.
 
-The Stop hook checks every time Claude finishes a response. If it received a Telegram message but only replied to the terminal (not via the Telegram tool), it blocks and forces a retry through Telegram.
+**Stop hook.** A deterministic Python script that walks the JSONL transcript backwards to the most recent real user prompt, then checks two conditions:
+1. If a Telegram channel tag was in the prompt and no `mcp__plugin_telegram_telegram__reply` tool was called → BLOCK with "missing TG reply"
+2. If a reply was called AND there is text either after it in the transcript OR in the in-flight `last_assistant_message` payload → BLOCK with "trailing terminal text after TG reply"
+
+The trailing-text check uses both the persisted transcript AND the stdin payload because the Stop hook fires before the final assistant text is flushed to JSONL. Without that cross-check, trailing text after the final reply slips through invisible.
 
 ## Customization
 
 - **Add commands**: Edit the `COMMANDS` dict in `telegram-commander.py`
-- **Change tmux session name**: Edit `TMUX_SESSION` variable
+- **Change tmux session name**: Edit `TMUX_SESSION` in the config block
 - **Linux**: Replace the launchd plist with a systemd service file
 - **Multiple users**: Add user IDs to an allowlist in the commander
+- **Custom button pickers**: Add new `callback_data` prefixes in the `callback_query` handler
 
 ## Credits
 

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Hook: Cache outbound Telegram replies (PostToolUse on telegram reply)
-# Logs Oscar/Claude's replies to the same JSONL cache as inbound messages.
+# Logs Claude's replies to the same JSONL cache as inbound messages.
 #
 # Install in Claude Code settings.json under hooks.PostToolUse
 # with matcher: "mcp__plugin_telegram_telegram__reply"

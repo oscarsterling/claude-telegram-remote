@@ -37,7 +37,7 @@ A set of scripts and configurations that give you full remote control of Claude 
 | `!status` | What Claude is working on right now (PID + uptime) |
 | `!stop` | Send SIGINT to interrupt the current task |
 | `!plan` | Switch to plan mode before acting |
-| `!restart` / `!reset` | Restart the Claude Code session (requires `RESTART_SCRIPT` config) |
+| `!restart` / `!reset` | Restart the Claude Code session (requires `RESTART_SCRIPT` config, supports wake-ping, see Advanced) |
 | `!mode` | Cycle permission modes (Shift+Tab) and report the current one |
 | `!opus` | Switch to Opus (1M context) |
 | `!sonnet` | Switch to Sonnet (faster) |
@@ -253,6 +253,26 @@ The trailing-text check uses both the persisted transcript AND the stdin payload
 - **Linux**: Replace the launchd plist with a systemd service file
 - **Multiple users**: Add user IDs to an allowlist in the commander
 - **Custom button pickers**: Add new `callback_data` prefixes in the `callback_query` handler
+
+## Advanced: Wake-Ping After `!restart`
+
+When you `!restart` from your phone, tmux comes back fast but Claude takes a beat to fully reset. The daemon tells you "restarting, give it 30 seconds" but you have no proof the new session is actually awake before you send your next message.
+
+Fix: have the new Claude announce itself in Telegram once `/reset` has processed.
+
+Pattern:
+
+1. `cmd_restart()` writes two files: the restart trigger **and** a "manual flag" file (e.g. `restart-manual-flag`).
+2. Your restart script runs its normal steps, verifies the new session is ready, then checks for the manual flag.
+3. If the flag exists, sleep ~10 seconds (buffer so `/reset` finishes), then `tmux send-keys` a short prompt like:
+   ```
+   You just rebooted via manual /reset. Reply in DM: "Awake. Session ready." with current time.
+   ```
+4. Delete the flag.
+
+Nightly cron restarts never create the flag, so scheduled resets stay silent. Only `!restart` (manual) triggers the ping.
+
+See `cmd_restart()` in `scripts/telegram-commander.py` for the skeleton.
 
 ## Credits
 

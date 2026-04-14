@@ -105,9 +105,20 @@ def cmd_stop():
 
 
 def cmd_restart():
+    """Restart Claude Code session via RESTART_SCRIPT.
+
+    Advanced: for a wake-ping after manual !restart, have this function also
+    write a "manual flag" file, and have your restart script check for it
+    after verifying the new session is ready. If present, sleep ~10s, inject
+    a wake-prompt into tmux, delete the flag. Nightly/scheduled restarts
+    skip the flag write → they stay silent. See README "Advanced: Wake-Ping".
+    """
     if not RESTART_SCRIPT:
         return "No RESTART_SCRIPT configured. Set RESTART_SCRIPT in telegram-commander.py."
     try:
+        # Optional: mark this as a manual restart so the script can wake-ping.
+        # manual_flag = os.path.expanduser("~/claude-telegram-remote/restart-manual-flag")
+        # with open(manual_flag, "w") as f: f.write(str(time.time()))
         subprocess.Popen(["bash", RESTART_SCRIPT],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return "Session restarting. Give it 30 seconds."

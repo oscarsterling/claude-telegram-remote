@@ -270,6 +270,43 @@ def cmd_cost():
     return f"Failed: {result}"
 
 
+def cmd_context():
+    """Scrape Claude Code status line from tmux pane. No Claude turn burned."""
+    import re
+    try:
+        r = subprocess.run(
+            [TMUX_PATH, "capture-pane", "-t", TMUX_SESSION, "-p"],
+            capture_output=True, text=True, timeout=5)
+        if r.returncode != 0:
+            return _no_session_msg()
+        lines = r.stdout.split("\n")
+        model_re = re.compile(r"(Opus|Sonnet|Haiku)\s+[\d.]+", re.IGNORECASE)
+        pct_re = re.compile(r"(\d+)%\s*(\d+[KM])")
+        model_line = ctx_line = ""
+        for idx, line in enumerate(lines):
+            if model_re.search(line):
+                model_line = line.strip()
+                if idx + 1 < len(lines):
+                    ctx_line = lines[idx + 1].strip()
+                break
+        if not model_line:
+            return "Status line not found in pane. Is Claude CLI running?"
+        model_m = model_re.search(model_line)
+        model = model_line[model_m.start():].split("|")[0].strip()
+        model = re.sub(r"[^\w\s().]", "", model).strip()
+        pct_m = pct_re.search(ctx_line)
+        if pct_m:
+            pct, window = pct_m.group(1), pct_m.group(2)
+            return f"{model} | {pct}% of {window} context used"
+        window_m = re.search(r"\((\d+[KM])\s*context\)", model)
+        window = window_m.group(1) if window_m else "?"
+        return f"{model} | 0% of {window} context used"
+    except subprocess.TimeoutExpired:
+        return "tmux capture-pane timed out."
+    except Exception as e:
+        return f"Context check failed: {e}"
+
+
 def cmd_effort(args=""):
     level = args.strip().lower() if args else ""
     valid_levels = {"max", "high", "medium", "auto"}
@@ -307,7 +344,43 @@ COMMANDS = {
     "!clear": cmd_clear, "!model": cmd_model,
     "!opus": cmd_opus, "!sonnet": cmd_sonnet,
     "!effort": cmd_effort, "!health": cmd_health, "!cost": cmd_cost,
+    "!context": cmd_context,
 }
+
+
+# Descriptions for Telegram's in-chat command menu (the "/" picker).
+# Telegram requires a leading "/" not "!", so we register the ! aliases
+# by stripping the prefix. Stored via setMyCommands.
+COMMAND_DESCRIPTIONS = [
+    ("ping", "Liveness check"),
+    ("context", "Show model + context % used (no turn burned)"),
+    ("restart", "Restart Claude Code session"),
+    ("health", "System health check"),
+    ("cost", "Show session cost"),
+    ("mode", "Cycle permission mode"),
+    ("effort", "Pick reasoning effort"),
+    ("model", "Switch model"),
+    ("opus", "Switch to Opus"),
+    ("sonnet", "Switch to Sonnet"),
+    ("plan", "Enter plan mode"),
+    ("compact", "Compact the conversation"),
+    ("clear", "Clear the conversation"),
+    ("status", "Daemon status"),
+    ("stop", "Stop the daemon"),
+]
+
+
+def register_bot_commands(token):
+    """Register slash-commands in Telegram's UI picker via setMyCommands."""
+    try:
+        commands = [{"command": c, "description": d} for c, d in COMMAND_DESCRIPTIONS]
+        result = telegram_api(token, "setMyCommands", {"commands": commands})
+        if result and result.get("ok"):
+            logging.info("Registered %d slash-commands in Telegram UI", len(commands))
+        else:
+            logging.warning("setMyCommands failed: %s", result)
+    except Exception as e:
+        logging.warning("setMyCommands exception: %s", e)
 
 
 def handle_signal(signum, frame):
@@ -331,6 +404,7 @@ def main():
     signal.signal(signal.SIGCHLD, signal.SIG_IGN)
 
     token = get_bot_token()
+    register_bot_commands(token)
     with open(PID_FILE, "w") as f:
         f.write(str(os.getpid()))
     logging.info("Daemon started, PID %d", os.getpid())

@@ -1,8 +1,6 @@
 # claude-telegram-remote
 
-**v2.1** (April 14, 2026). Control Claude Code from your phone via Telegram. Six pieces that turn a terminal-only AI into a mobile-first assistant, with a typing indicator, a deterministic Stop-hook, five new slash commands, and now a wake-ping so the new Claude announces himself after a manual `!restart`.
-
-> Two updates shipped same day: v2.0 in the morning (typing indicator + Stop-hook rewrite + five new commands), then v2.1 in the afternoon (wake-ping pattern for `!restart`).
+**v3.0** (April 21, 2026). Control Claude Code from your phone via Telegram. 22 commands, interactive checkpoint rollback, session save/restore, a typing indicator, a deterministic Stop-hook, and inline button pickers.
 
 ![Hero](assets/hero.png)
 
@@ -12,13 +10,23 @@ A set of scripts and configurations that give you full remote control of Claude 
 
 **[Read the full story on Clelp.ai](https://clelp.ai/blog/claude-telegram-remote-control)**
 
-## What's New in v2
+## Version History
 
-- **Typing indicator pinger** — Telegram now shows "Claude is typing..." the entire time he's working, just like a real chat. Spawns on inbound, dies on reply, hard 10-min ceiling.
-- **Deterministic Stop hook** — Replaces the old LLM-judge with a Python script that walks the actual transcript. Catches both "missing TG reply" AND "trailing terminal text after the reply" (the silent killer).
-- **Five new commands** — `!ping`, `!reset`, `!effort`, `!health`, `!cost`
-- **Inline button picker** — `!effort` with no argument pops up a Max/High/Medium/Auto button picker via callback queries.
-- **Optional health check hook** — Wire your own health-check script into `!health`.
+### v3.0
+
+- **Interactive /rewind with Telegram buttons.** Opens the Claude Code checkpoint picker, parses it from tmux, and sends tappable buttons. Pick a checkpoint or cancel, all from your phone. Cooldown guard prevents duplicate execution.
+- **Session save/restore.** `!save` captures a compressed brief of what you were working on (exchanges, files changed, commits, where you left off). `!restore` injects a saved brief into a fresh session. `!contexts` lists everything you have saved.
+- **Seven new commands.** `!rewind`, `!save`, `!restore`, `!contexts`, `!fast`, `!resume`, `!init`.
+- **Removed terminal-only commands.** `!review`, `!doctor`, and `!memory` produced output that only made sense in a terminal, not in Telegram.
+- **Fixed dict-slice crash.** The logging line now handles dict responses without raising TypeError (this was causing a launchd respawn loop).
+
+### v2.0
+
+- **Typing indicator pinger.** Telegram now shows "Claude is typing..." the entire time he is working, just like a real chat. Spawns on inbound, dies on reply, hard 10-min ceiling.
+- **Deterministic Stop hook.** Replaces the old LLM-judge with a Python script that walks the actual transcript. Catches both "missing TG reply" AND "trailing terminal text after the reply" (the silent killer).
+- **Five new commands.** `!ping`, `!reset`, `!effort`, `!health`, `!cost`.
+- **Inline button picker.** `!effort` with no argument pops up a Max/High/Medium/Auto button picker via callback queries.
+- **Optional health check hook.** Wire your own health-check script into `!health`.
 
 ## The Six Pieces
 
@@ -26,7 +34,7 @@ A set of scripts and configurations that give you full remote control of Claude 
 |---|-------|-------------|
 | 1 | **Conversation Layer** | Anthropic's Telegram MCP plugin. Claude receives and sends messages via Telegram. |
 | 2 | **Message Cache** | Hooks that log all messages per chat. Gives Claude thread context across sessions. |
-| 3 | **Command Daemon** | Background service that watches for `!commands` and injects them into Claude Code's tmux session. Now with inline-button callbacks. |
+| 3 | **Command Daemon** | Background service that watches for `!commands` and injects them into Claude Code's tmux session. Handles inline-button callbacks for effort and rewind pickers. |
 | 4 | **Stop Hook** | Deterministic Python check. Blocks if Claude got a TG message and didn't reply, OR if he wrote terminal text after the final reply. |
 | 5 | **Typing Pinger** | Spawns a `sendChatAction(typing)` loop on inbound, killed on reply. Single-instance per chat. |
 | 6 | **Proactive Messaging** | Shell scripts for cron notifications and interactive inline keyboard buttons. |
@@ -49,6 +57,14 @@ A set of scripts and configurations that give you full remote control of Claude 
 | `!cost` | Show current session cost |
 | `!effort [max\|high\|medium\|auto]` | Set thinking effort level (no arg = button picker) |
 | `!health` | Run your custom health check script (requires `HEALTH_SCRIPT` config) |
+| `!context` | Show model + context % used (no Claude turn burned) |
+| `!rewind` | Roll back to a prior checkpoint (interactive button picker) |
+| `!fast` | Toggle fast output mode (same model, faster output) |
+| `!resume [query]` | Resume a previous conversation |
+| `!init` | Initialize CLAUDE.md for current project |
+| `!save [label]` | Save a compressed context brief of the current session |
+| `!restore <label>` | Restore a saved session context into Claude Code |
+| `!contexts` | List all saved session context briefs |
 
 Both `!command` and `/command` syntax work, since some Telegram clients auto-complete `/`.
 
@@ -109,11 +125,12 @@ In Claude Code, enable the Telegram plugin:
 
 Edit `scripts/telegram-commander.py` and set the values in the `=== CONFIGURE THESE ===` block:
 
-- `YOUR_USER_ID` — your Telegram user ID
-- `TMUX_SESSION` — your tmux session name (default: `claude`)
-- `TMUX_PATH` — output of `which tmux`
-- `RESTART_SCRIPT` — optional, absolute path to your restart script (or leave `""` to disable `!restart`)
-- `HEALTH_SCRIPT` — optional, absolute path to your health check script (or leave `""` to disable `!health`)
+- `YOUR_USER_ID` - your Telegram user ID
+- `TMUX_SESSION` - your tmux session name (default: `claude`)
+- `TMUX_PATH` - output of `which tmux`
+- `RESTART_SCRIPT` - optional, absolute path to your restart script (or leave `""` to disable `!restart`)
+- `HEALTH_SCRIPT` - optional, absolute path to your health check script (or leave `""` to disable `!health`)
+- `REPO_DIR` - where you cloned this repo (default: `~/claude-telegram-remote`)
 
 ### Step 6: Install the Hooks
 
@@ -214,7 +231,10 @@ Send `!ping` from your command bot. If you get `Pong`, you're live.
 ```
 claude-telegram-remote/
   scripts/
-    telegram-commander.py            # Command daemon (15 commands + button callbacks)
+    telegram-commander.py            # Command daemon (22 commands + button callbacks)
+    session-save.py                  # Save session context briefs
+    session-restore.py               # Restore saved context briefs
+    session-list.py                  # List saved context briefs
     tg-send.sh                       # Proactive plain text messaging
     tg-buttons.sh                    # Proactive inline keyboard buttons
   hooks/
@@ -226,6 +246,7 @@ claude-telegram-remote/
     check-tg-reply-completeness.py   # Deterministic Stop hook
   services/
     com.claude.telegram-commander.plist  # macOS launchd config
+  saved-contexts/                    # Session context briefs (created by !save)
   assets/
     hero.png                         # Project hero image
 ```
@@ -236,17 +257,20 @@ claude-telegram-remote/
 - Slash commands (`!plan`, `!clear`, `!compact`, `!cost`): injected as keystrokes into tmux via `tmux send-keys`
 - Raw keys (`!mode`): sent as special key names (e.g., `BTab` for Shift+Tab)
 - Process control (`!stop`, `!restart`): direct signal/subprocess calls
-- Inline pickers (`!effort` with no arg): sends inline keyboard buttons; the daemon also handles the callback_query taps
+- Inline pickers (`!effort` with no arg, `!rewind`): sends inline keyboard buttons; the daemon handles the callback_query taps
+- Session management (`!save`, `!restore`, `!contexts`): runs helper scripts that parse and store session JSONL data
 
 **Message cache hooks.** Fire on every prompt submission and every Telegram reply, logging both sides of the conversation to JSONL files organized by chat ID.
 
 **Typing pinger.** When a Telegram message arrives, `start-typing-pinger.sh` extracts the chat_id from the inbound channel tag and spawns `typing-indicator-pinger.py` as a detached process. The pinger loops `sendChatAction(typing)` every 4 seconds (Telegram clears typing after ~5s, so this keeps it lit). It dies in three ways: PostToolUse on the reply tool, the Stop hook backstop, or the hard 10-minute ceiling.
 
 **Stop hook.** A deterministic Python script that walks the JSONL transcript backwards to the most recent real user prompt, then checks two conditions:
-1. If a Telegram channel tag was in the prompt and no `mcp__plugin_telegram_telegram__reply` tool was called → BLOCK with "missing TG reply"
-2. If a reply was called AND there is text either after it in the transcript OR in the in-flight `last_assistant_message` payload → BLOCK with "trailing terminal text after TG reply"
+1. If a Telegram channel tag was in the prompt and no `mcp__plugin_telegram_telegram__reply` tool was called, BLOCK with "missing TG reply"
+2. If a reply was called AND there is text either after it in the transcript OR in the in-flight `last_assistant_message` payload, BLOCK with "trailing terminal text after TG reply"
 
 The trailing-text check uses both the persisted transcript AND the stdin payload because the Stop hook fires before the final assistant text is flushed to JSONL. Without that cross-check, trailing text after the final reply slips through invisible.
+
+**Session save/restore.** `!save` runs `session-save.py`, which reads the tail of the active session JSONL, extracts Telegram replies, user requests, file modifications, and git commits, then compresses them into a structured markdown brief. `!restore` reads that brief back and injects it as text into the tmux session, giving Claude Code the context from a previous session without burning through the full history.
 
 ## Customization
 
@@ -255,6 +279,7 @@ The trailing-text check uses both the persisted transcript AND the stdin payload
 - **Linux**: Replace the launchd plist with a systemd service file
 - **Multiple users**: Add user IDs to an allowlist in the commander
 - **Custom button pickers**: Add new `callback_data` prefixes in the `callback_query` handler
+- **Session save location**: Edit `SAVE_DIR` in `session-save.py` and `session-restore.py`
 
 ## Advanced: Wake-Ping After `!restart`
 

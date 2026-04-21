@@ -17,10 +17,11 @@ TMUX_SESSION = "claude"  # Your tmux session name where Claude Code runs
 TMUX_PATH = "/opt/homebrew/bin/tmux"  # `which tmux` to find yours
 RESTART_SCRIPT = ""  # Optional: absolute path to your restart script (leave "" to disable !restart)
 HEALTH_SCRIPT = ""  # Optional: absolute path to a health-check script (leave "" to disable !health)
+REPO_DIR = os.path.expanduser("~/claude-telegram-remote")  # Where this repo lives
 # =======================
 
-PID_FILE = os.path.expanduser("~/claude-telegram-remote/commander.pid")
-LOG_FILE = os.path.expanduser("~/claude-telegram-remote/commander.log")
+PID_FILE = os.path.join(REPO_DIR, "commander.pid")
+LOG_FILE = os.path.join(REPO_DIR, "commander.log")
 POLL_TIMEOUT = 30
 RETRY_DELAY = 30
 running = True
@@ -111,13 +112,13 @@ def cmd_restart():
     write a "manual flag" file, and have your restart script check for it
     after verifying the new session is ready. If present, sleep ~10s, inject
     a wake-prompt into tmux, delete the flag. Nightly/scheduled restarts
-    skip the flag write → they stay silent. See README "Advanced: Wake-Ping".
+    skip the flag write, so they stay silent. See README "Advanced: Wake-Ping".
     """
     if not RESTART_SCRIPT:
         return "No RESTART_SCRIPT configured. Set RESTART_SCRIPT in telegram-commander.py."
     try:
         # Optional: mark this as a manual restart so the script can wake-ping.
-        # manual_flag = os.path.expanduser("~/claude-telegram-remote/restart-manual-flag")
+        # manual_flag = os.path.join(REPO_DIR, "restart-manual-flag")
         # with open(manual_flag, "w") as f: f.write(str(time.time()))
         subprocess.Popen(["bash", RESTART_SCRIPT],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -337,6 +338,168 @@ def cmd_health():
         return f"Health check failed: {e}"
 
 
+def cmd_fast():
+    """Switch to fast output mode."""
+    result = inject_slash_command("/fast")
+    if result == "sent":
+        return "Switched to fast mode (same model, faster output)."
+    if result == "no_session":
+        return _no_session_msg()
+    return f"Failed: {result}"
+
+
+def cmd_resume(args=""):
+    """Resume a previous conversation."""
+    result = inject_slash_command(f"/resume {args}".strip())
+    if result == "sent":
+        return "Sent /resume."
+    if result == "no_session":
+        return _no_session_msg()
+    return f"Failed: {result}"
+
+
+def cmd_init():
+    """Initialize CLAUDE.md for current project."""
+    result = inject_slash_command("/init")
+    if result == "sent":
+        return "Sent /init."
+    if result == "no_session":
+        return _no_session_msg()
+    return f"Failed: {result}"
+
+
+_rewind_last_run = 0  # cooldown guard
+
+
+def cmd_rewind(args=""):
+    """Open /rewind picker, read checkpoints from tmux, send as Telegram buttons."""
+    global _rewind_last_run
+    now = time.time()
+    # Cooldown: ignore if fired within last 20 seconds
+    if now - _rewind_last_run < 20:
+        return None  # silently skip duplicate
+    _rewind_last_run = now
+
+    check = subprocess.run([TMUX_PATH, "has-session", "-t", TMUX_SESSION],
+                           capture_output=True, text=True)
+    if check.returncode != 0:
+        return _no_session_msg()
+
+    # Inject /rewind into CC to open the picker
+    result = inject_slash_command("/rewind")
+    if result != "sent":
+        return f"Failed to send /rewind: {result}"
+    time.sleep(2.5)
+
+    # Read the tmux pane to parse checkpoints
+    r = subprocess.run([TMUX_PATH, "capture-pane", "-t", TMUX_SESSION, "-p"],
+                       capture_output=True, text=True, timeout=5)
+    if r.returncode != 0:
+        return "Could not read tmux pane."
+    lines = r.stdout.strip().split("\n")
+
+    # Parse checkpoint entries from Claude Code's rewind picker.
+    # Format:
+    #   /clear
+    #   27 files changed +1274 -264
+    #   /reset/reset
+    #   2 files changed +63 -8
+    # > (current)
+    checkpoints = []
+    in_rewind = False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if "Rewind" in stripped and not in_rewind:
+            in_rewind = True
+            continue
+        if not in_rewind:
+            continue
+        if "(current)" in stripped:
+            break
+        if stripped.startswith("/") or stripped.startswith("\u2190"):
+            # This is a checkpoint label
+            detail = ""
+            if i + 1 < len(lines):
+                next_line = lines[i + 1].strip()
+                if "file" in next_line and "changed" in next_line:
+                    detail = f" ({next_line})"
+                elif next_line == "No code changes":
+                    detail = " (no code changes)"
+            checkpoints.append({"label": stripped + detail, "index": len(checkpoints)})
+
+    if not checkpoints:
+        # Close the picker cleanly
+        subprocess.run([TMUX_PATH, "send-keys", "-t", TMUX_SESSION, "Escape"],
+                       capture_output=True, text=True, timeout=5)
+        return "No checkpoints found in this session."
+
+    # Leave the picker OPEN - user will choose via buttons
+    # Build buttons: up to 5 most recent + Cancel
+    buttons = []
+    for cp in checkpoints[:5]:
+        label = cp["label"][:40]  # Telegram button text limit
+        buttons.append([{"text": label, "callback_data": f"rewind:{cp['index']}"}])
+    buttons.append([{"text": "Cancel", "callback_data": "rewind:cancel"}])
+
+    return {"type": "rewind_picker", "buttons": buttons, "count": len(checkpoints)}
+
+
+def cmd_save(args=""):
+    """Save a compressed context brief of the current session."""
+    import datetime as _dt
+    label = args.strip() if args.strip() else _dt.datetime.now().strftime("auto-%Y%m%d-%H%M")
+    try:
+        r = subprocess.run(
+            ["python3", os.path.join(os.path.dirname(__file__), "session-save.py"), label],
+            capture_output=True, text=True, timeout=60,
+            cwd=REPO_DIR)
+        output = r.stdout.strip()
+        if r.returncode != 0:
+            return f"Save failed: {r.stderr.strip() or output}"
+        return output or f"Saved context as '{label}'"
+    except subprocess.TimeoutExpired:
+        return "Save timed out (60s). Session might be too large."
+    except Exception as e:
+        return f"Save failed: {e}"
+
+
+def cmd_restore(args=""):
+    """Restore a saved context brief into the CC session."""
+    label = args.strip()
+    if not label:
+        return "Usage: !restore <label>. Use !contexts to see saved contexts."
+    try:
+        r = subprocess.run(
+            ["python3", os.path.join(os.path.dirname(__file__), "session-restore.py"), label],
+            capture_output=True, text=True, timeout=10,
+            cwd=REPO_DIR)
+        if r.returncode != 0:
+            return r.stdout.strip() or r.stderr.strip() or "Restore failed."
+        brief = r.stdout.strip()
+        if not brief:
+            return "Restore returned empty content."
+        # Inject the brief into CC as a user message
+        inject_result = inject_slash_command(
+            f"Context restore from saved session '{label}': {brief[:3000]}")
+        if inject_result == "sent":
+            return f"Restored '{label}' into CC session."
+        return f"Restored brief but failed to inject: {inject_result}"
+    except Exception as e:
+        return f"Restore failed: {e}"
+
+
+def cmd_contexts(args=""):
+    """List all saved session contexts."""
+    try:
+        r = subprocess.run(
+            ["python3", os.path.join(os.path.dirname(__file__), "session-list.py")],
+            capture_output=True, text=True, timeout=10,
+            cwd=REPO_DIR)
+        return r.stdout.strip() or "No saved contexts."
+    except Exception as e:
+        return f"Failed: {e}"
+
+
 COMMANDS = {
     "!ping": cmd_ping, "!status": cmd_status, "!stop": cmd_stop,
     "!restart": cmd_restart, "!reset": cmd_restart,
@@ -344,7 +507,10 @@ COMMANDS = {
     "!clear": cmd_clear, "!model": cmd_model,
     "!opus": cmd_opus, "!sonnet": cmd_sonnet,
     "!effort": cmd_effort, "!health": cmd_health, "!cost": cmd_cost,
-    "!context": cmd_context,
+    "!context": cmd_context, "!rewind": cmd_rewind,
+    "!fast": cmd_fast,
+    "!resume": cmd_resume, "!init": cmd_init,
+    "!save": cmd_save, "!restore": cmd_restore, "!contexts": cmd_contexts,
 }
 
 
@@ -357,6 +523,8 @@ COMMAND_DESCRIPTIONS = [
     ("restart", "Restart Claude Code session"),
     ("health", "System health check"),
     ("cost", "Show session cost"),
+    ("rewind", "Roll back to a prior checkpoint"),
+    ("fast", "Toggle fast output mode"),
     ("mode", "Cycle permission mode"),
     ("effort", "Pick reasoning effort"),
     ("model", "Switch model"),
@@ -365,6 +533,11 @@ COMMAND_DESCRIPTIONS = [
     ("plan", "Enter plan mode"),
     ("compact", "Compact the conversation"),
     ("clear", "Clear the conversation"),
+    ("resume", "Resume a previous conversation"),
+    ("init", "Initialize CLAUDE.md"),
+    ("save", "Save session context with a label"),
+    ("restore", "Restore a saved session context"),
+    ("contexts", "List saved session contexts"),
     ("status", "Daemon status"),
     ("stop", "Stop the daemon"),
 ]
@@ -426,6 +599,7 @@ def main():
                 update_id = update["update_id"]
                 last_update_id = max(last_update_id, update_id)
 
+                # Handle callback queries (inline button taps)
                 cb = update.get("callback_query")
                 if cb:
                     cb_id = cb["id"]
@@ -452,6 +626,50 @@ def main():
                                 "text": f"Failed: {tmux_result}"
                             })
                         logging.info("Callback effort:%s -> %s", level, tmux_result)
+                    elif cb_user_id == YOUR_USER_ID and data.startswith("rewind:"):
+                        choice = data.split(":", 1)[1]
+                        if choice == "cancel":
+                            subprocess.run(
+                                [TMUX_PATH, "send-keys", "-t", TMUX_SESSION, "Escape"],
+                                capture_output=True, text=True, timeout=5)
+                            telegram_api(token, "answerCallbackQuery", {
+                                "callback_query_id": cb_id,
+                                "text": "Rewind cancelled"
+                            })
+                            telegram_api(token, "editMessageText", {
+                                "chat_id": cb_chat_id,
+                                "message_id": cb_msg_id,
+                                "text": "Rewind: cancelled"
+                            })
+                        else:
+                            # Picker is already open - navigate to checkpoint
+                            try:
+                                idx = int(choice)
+                            except (ValueError, TypeError):
+                                telegram_api(token, "answerCallbackQuery", {
+                                    "callback_query_id": cb_id,
+                                    "text": "Invalid checkpoint"
+                                })
+                                logging.warning("Invalid rewind choice: %s", choice)
+                                continue
+                            for _ in range(idx):
+                                subprocess.run(
+                                    [TMUX_PATH, "send-keys", "-t", TMUX_SESSION, "Up"],
+                                    capture_output=True, text=True, timeout=5)
+                                time.sleep(0.3)
+                            subprocess.run(
+                                [TMUX_PATH, "send-keys", "-t", TMUX_SESSION, "Enter"],
+                                capture_output=True, text=True, timeout=5)
+                            telegram_api(token, "answerCallbackQuery", {
+                                "callback_query_id": cb_id,
+                                "text": f"Rewinding to checkpoint {idx}"
+                            })
+                            telegram_api(token, "editMessageText", {
+                                "chat_id": cb_chat_id,
+                                "message_id": cb_msg_id,
+                                "text": f"Rewind: restoring checkpoint {idx}."
+                            })
+                        logging.info("Callback rewind:%s", choice)
                     else:
                         telegram_api(token, "answerCallbackQuery", {"callback_query_id": cb_id})
                     continue
@@ -484,7 +702,11 @@ def main():
                     available = ", ".join(sorted(COMMANDS.keys()))
                     response = f"Unknown command: {cmd_key}\nAvailable: {available}"
 
-                if response == "picker":
+                # None means silently skip (e.g. cooldown guard)
+                if response is None:
+                    continue
+                # Special case: "picker" means send effort inline buttons
+                elif response == "picker":
                     try:
                         send_buttons(token, chat_id, "Set effort level:", [
                             [{"text": "Max", "callback_data": "effort:max"},
@@ -494,9 +716,16 @@ def main():
                         ])
                     except Exception as e:
                         reply(token, chat_id, f"Button send failed: {e}")
+                elif isinstance(response, dict) and response.get("type") == "rewind_picker":
+                    try:
+                        send_buttons(token, chat_id,
+                                     f"Rewind to checkpoint ({response['count']} available):",
+                                     response["buttons"])
+                    except Exception as e:
+                        reply(token, chat_id, f"Rewind picker failed: {e}")
                 else:
-                    reply(token, chat_id, response)
-                logging.info("Replied to %s: %s", cmd_key, response[:80])
+                    reply(token, chat_id, str(response))
+                logging.info("Replied to %s: %s", cmd_key, str(response)[:80])
     finally:
         try:
             os.remove(PID_FILE)

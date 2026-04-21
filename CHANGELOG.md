@@ -1,5 +1,15 @@
 # Changelog
 
+## v3.1.0 - 2026-04-21
+
+### Added
+- **`!refresh`** command. Save, reset, restore in one shot. Captures a context brief, sends `/reset` to Claude Code, waits for the fresh session, then injects the brief back in. If any step fails, tells you exactly where it stopped and gives you the label to `!restore` manually.
+
+### Changed
+- **`!restore` now injects via channel tags.** The restored brief is wrapped in Telegram `<channel>` tags with your user ID, so Claude treats it as a real Telegram message and responds in Telegram instead of the terminal. `!refresh` uses the same injection method.
+- Command count increased from 22 to 23.
+- `COMMAND_DESCRIPTIONS` updated with `!refresh` for Telegram's `/` picker menu.
+
 ## v3.0.0 - 2026-04-21
 
 ### Added

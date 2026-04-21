@@ -1,6 +1,6 @@
 # claude-telegram-remote
 
-**v3.0** (April 21, 2026). Control Claude Code from your phone via Telegram. 22 commands, interactive checkpoint rollback, session save/restore, a typing indicator, a deterministic Stop-hook, and inline button pickers.
+**v3.1** (April 21, 2026). Control Claude Code from your phone via Telegram. 23 commands, interactive checkpoint rollback, session save/restore/refresh, a typing indicator, a deterministic Stop-hook, and inline button pickers.
 
 ![Hero](assets/hero.png)
 
@@ -11,6 +11,11 @@ A set of scripts and configurations that give you full remote control of Claude 
 **[Read the full story on Clelp.ai](https://clelp.ai/blog/claude-telegram-remote-control)**
 
 ## Version History
+
+### v3.1
+
+- **`!refresh` command.** Save, reset, restore in one shot. Captures context, resets the session, and injects the brief into the fresh session automatically. If any step fails, tells you exactly where it stopped and how to recover manually.
+- **Channel-tag injection for restore/refresh.** `!restore` and `!refresh` now wrap the injected brief in Telegram channel tags so Claude treats it as a real Telegram message and responds in Telegram, not the terminal.
 
 ### v3.0
 
@@ -62,6 +67,7 @@ A set of scripts and configurations that give you full remote control of Claude 
 | `!fast` | Toggle fast output mode (same model, faster output) |
 | `!resume [query]` | Resume a previous conversation |
 | `!init` | Initialize CLAUDE.md for current project |
+| `!refresh` | Save context, reset session, restore context in one shot |
 | `!save [label]` | Save a compressed context brief of the current session |
 | `!restore <label>` | Restore a saved session context into Claude Code |
 | `!contexts` | List all saved session context briefs |
@@ -231,7 +237,7 @@ Send `!ping` from your command bot. If you get `Pong`, you're live.
 ```
 claude-telegram-remote/
   scripts/
-    telegram-commander.py            # Command daemon (22 commands + button callbacks)
+    telegram-commander.py            # Command daemon (23 commands + button callbacks)
     session-save.py                  # Save session context briefs
     session-restore.py               # Restore saved context briefs
     session-list.py                  # List saved context briefs
@@ -270,7 +276,7 @@ claude-telegram-remote/
 
 The trailing-text check uses both the persisted transcript AND the stdin payload because the Stop hook fires before the final assistant text is flushed to JSONL. Without that cross-check, trailing text after the final reply slips through invisible.
 
-**Session save/restore.** `!save` runs `session-save.py`, which reads the tail of the active session JSONL, extracts Telegram replies, user requests, file modifications, and git commits, then compresses them into a structured markdown brief. `!restore` reads that brief back and injects it as text into the tmux session, giving Claude Code the context from a previous session without burning through the full history.
+**Session save/restore/refresh.** `!save` runs `session-save.py`, which reads the tail of the active session JSONL, extracts Telegram replies, user requests, file modifications, and git commits, then compresses them into a structured markdown brief. `!restore` reads that brief back and injects it into the tmux session wrapped in Telegram channel tags, so Claude treats it as a real message and responds in Telegram. `!refresh` chains save, `/reset`, and restore into a single command for mid-session resets without losing context.
 
 ## Customization
 

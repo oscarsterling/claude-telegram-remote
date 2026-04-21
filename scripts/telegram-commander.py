@@ -478,14 +478,81 @@ def cmd_restore(args=""):
         brief = r.stdout.strip()
         if not brief:
             return "Restore returned empty content."
-        # Inject the brief into CC as a user message
-        inject_result = inject_slash_command(
-            f"Context restore from saved session '{label}': {brief[:3000]}")
+        # Inject wrapped in channel tags so Claude treats it as a Telegram message
+        inject_msg = (
+            '<channel source="plugin:telegram:telegram" chat_id="'
+            + str(YOUR_USER_ID)
+            + '" message_id="0" user="user" user_id="'
+            + str(YOUR_USER_ID)
+            + '" ts="">'
+            + f"Context restore from saved session '{label}': {brief[:2800]}"
+            + '</channel>'
+        )
+        inject_result = inject_slash_command(inject_msg)
         if inject_result == "sent":
             return f"Restored '{label}' into CC session."
         return f"Restored brief but failed to inject: {inject_result}"
     except Exception as e:
         return f"Restore failed: {e}"
+
+
+def cmd_refresh(args=""):
+    """Save context, reset CC, restore context. Full refresh in one command."""
+    import datetime as _dt
+    label = "refresh-" + _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    steps = []
+
+    # Step 1: Save
+    try:
+        r = subprocess.run(
+            ["python3", os.path.join(os.path.dirname(__file__), "session-save.py"), label],
+            capture_output=True, text=True, timeout=60,
+            cwd=REPO_DIR)
+        if r.returncode != 0:
+            return f"Refresh aborted: save failed. {r.stderr.strip()}"
+        steps.append("saved")
+    except Exception as e:
+        return f"Refresh aborted: save failed. {e}"
+
+    # Step 2: Reset
+    time.sleep(1)
+    result = inject_slash_command("/reset")
+    if result != "sent":
+        return f"Refresh aborted: reset failed. {result}"
+    steps.append("reset sent")
+
+    # Step 3: Wait for fresh prompt
+    time.sleep(3)
+
+    # Step 4: Restore
+    try:
+        r = subprocess.run(
+            ["python3", os.path.join(os.path.dirname(__file__), "session-restore.py"), label],
+            capture_output=True, text=True, timeout=10,
+            cwd=REPO_DIR)
+        if r.returncode != 0:
+            return f"Refresh partial: saved + reset done, but restore failed. Use !restore {label} manually."
+        brief = r.stdout.strip()
+        if not brief:
+            return f"Refresh partial: saved + reset done, but restore empty. Use !restore {label} manually."
+        inject_msg = (
+            '<channel source="plugin:telegram:telegram" chat_id="'
+            + str(YOUR_USER_ID)
+            + '" message_id="0" user="user" user_id="'
+            + str(YOUR_USER_ID)
+            + '" ts="">'
+            + f"Context restore from refresh '{label}': {brief[:2800]}"
+            + '</channel>'
+        )
+        inject_result = inject_slash_command(inject_msg)
+        if inject_result == "sent":
+            steps.append("restored")
+        else:
+            return f"Refresh partial: saved + reset done, inject failed. Use !restore {label} manually."
+    except Exception as e:
+        return f"Refresh partial: saved + reset done, restore error: {e}. Use !restore {label} manually."
+
+    return f"Refresh complete ({label}). Saved, reset, restored."
 
 
 def cmd_contexts(args=""):
@@ -511,6 +578,7 @@ COMMANDS = {
     "!fast": cmd_fast,
     "!resume": cmd_resume, "!init": cmd_init,
     "!save": cmd_save, "!restore": cmd_restore, "!contexts": cmd_contexts,
+    "!refresh": cmd_refresh,
 }
 
 
@@ -535,6 +603,7 @@ COMMAND_DESCRIPTIONS = [
     ("clear", "Clear the conversation"),
     ("resume", "Resume a previous conversation"),
     ("init", "Initialize CLAUDE.md"),
+    ("refresh", "Save, reset, restore in one shot"),
     ("save", "Save session context with a label"),
     ("restore", "Restore a saved session context"),
     ("contexts", "List saved session contexts"),

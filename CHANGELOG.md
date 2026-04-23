@@ -1,5 +1,17 @@
 # Changelog
 
+## v3.2.0 - 2026-04-22
+
+### Added
+- **`advanced/reply-context-patch/`** — optional local patch to `telegram@claude-plugins-official` that surfaces Telegram's "reply to this message" gesture into Claude's inbound channel payload. Adds `reply_to_message_id` meta + prepends a 500-char quote of the replied-to body so Claude sees what you were replying to, even across session resets. Idempotent apply script with `--check` and `--dry-run` modes, anchor-based injection so it refuses to produce partial patches if upstream source shape changes. See `advanced/reply-context-patch/README.md`.
+
+### Changed
+- **`session-save.py` rewrite: full-fidelity round-trip, no more truncation.** Three compounding bugs were quietly lossy:
+  - Per-message char caps (user 300, assistant 400) sliced individual messages mid-sentence. Replaced with per-section budgets — single messages now restore in full.
+  - Commit extraction regex `-m\s+"([^"]+)"` matched `$(cat <<'EOF'...` heredoc preambles instead of the actual commit body, because `[^"]` matches newlines and the closing quote was many lines later. Replaced with `git log --since=<session-start>` using the JSONL's first timestamp as cutoff. No more bash-history archaeology.
+  - Output structure now leads with the full last exchange (both sides), then paired earlier exchanges, then files/commits/tools. Fresh sessions read it top-to-bottom and know exactly where the last turn left off.
+- Restore payloads auto-prefixed with `Context restore from` are now filtered out of the user-request parse so repeated save/restore cycles don't recursively echo old briefs.
+
 ## v3.1.0 - 2026-04-21
 
 ### Added

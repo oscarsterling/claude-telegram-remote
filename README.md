@@ -1,6 +1,6 @@
 # claude-telegram-remote
 
-**v3.1** (April 21, 2026). Control Claude Code from your phone via Telegram. 23 commands, interactive checkpoint rollback, session save/restore/refresh, a typing indicator, a deterministic Stop-hook, and inline button pickers.
+**v3.2** (April 22, 2026). Control Claude Code from your phone via Telegram. 23 commands, interactive checkpoint rollback, session save/restore/refresh, a typing indicator, a deterministic Stop-hook, and inline button pickers.
 
 ![Hero](assets/hero.png)
 
@@ -11,6 +11,11 @@ A set of scripts and configurations that give you full remote control of Claude 
 **[Read the full story on Clelp.ai](https://clelp.ai/blog/claude-telegram-remote-control)**
 
 ## Version History
+
+### v3.2
+
+- **Full-fidelity session save/restore.** `session-save.py` no longer slices individual messages at character caps, uses `git log --since=<session-start>` instead of heredoc-breaking regex for commit extraction, and leads the output with the last full exchange so fresh sessions pick up exactly where the previous one left off. Restore payloads from prior saves are filtered out of the parse to stop recursive echo across save/restore cycles.
+- **Optional reply-context patch for the Telegram MCP plugin.** Under `advanced/reply-context-patch/`, an idempotent script that patches `telegram@claude-plugins-official`'s `server.ts` to surface Telegram's "reply to this message" gesture to Claude. Without the patch, the swipe-reply is invisible. Ships with `--check` and `--dry-run` modes for safe re-runs after plugin auto-upgrades.
 
 ### v3.1
 
@@ -253,6 +258,10 @@ claude-telegram-remote/
   services/
     com.claude.telegram-commander.plist  # macOS launchd config
   saved-contexts/                    # Session context briefs (created by !save)
+  advanced/
+    reply-context-patch/             # Optional patch for the Telegram MCP plugin
+      apply.py                       # Idempotent patch applier with --check / --dry-run
+      README.md                      # What it does, how to install, rot guard
   assets/
     hero.png                         # Project hero image
 ```

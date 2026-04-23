@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-"""Save a compressed context brief of the current Claude Code session."""
+"""Save a context brief of the current Claude Code session.
+
+Designed to be paired with session-restore.py via !refresh. Optimized for
+faithful round-trip context, not aggressive compression. Caps are per-section
+(not per-message) so individual exchanges restore intact.
+
+v3.2 changes vs the earlier compression-first implementation:
+- Removed per-message char caps (was 300/400 on user/assistant). Individual
+  messages now restore in full and only get trimmed at section budgets.
+- Commit extraction now uses `git log --since=<session-start>` instead of
+  regex-parsing bash `git commit -m "..."` invocations, which mis-captured
+  heredoc preambles on multi-line messages.
+- Output leads with the last full exchange (both sides), then earlier paired
+  exchanges, then files/commits/tools. Easier to resume from.
+"""
 import json, os, sys, glob, subprocess, datetime, re
 
 # === CONFIGURE THESE ===
@@ -9,6 +23,12 @@ SAVE_DIR = os.path.expanduser("~/claude-telegram-remote/saved-contexts")
 # =======================
 
 SESSIONS_DIR = os.path.expanduser("~/.claude/sessions")
+
+# Section budgets in chars. Generous so individual messages aren't sliced.
+# Aim: total file under ~16KB so the tmux paste in !refresh stays reliable.
+MAX_LAST_EXCHANGE_CHARS = 4000   # full user + full assistant at the tail
+MAX_RECENT_EXCHANGE_CHARS = 6000 # paired earlier exchanges
+MAX_PER_TOPIC_CHARS = 800        # terminal-text excerpts (less important)
 
 
 def _detect_projects_dir():
@@ -31,38 +51,24 @@ def _detect_projects_dir():
     return ""
 
 
-def get_active_session_id():
-    """Find the most recent session ID from ~/.claude/sessions/."""
-    files = sorted(glob.glob(os.path.join(SESSIONS_DIR, "*.json")),
-                   key=os.path.getmtime, reverse=True)
-    for f in files:
-        try:
-            with open(f) as fh:
-                data = json.load(fh)
-                if data.get("sessionId"):
-                    return data["sessionId"]
-        except Exception:
-            continue
-    return None
-
-
-def find_session_jsonl(session_id, projects_dir):
-    """Find the JSONL file for a given session ID."""
-    path = os.path.join(projects_dir, f"{session_id}.jsonl")
-    if os.path.exists(path):
-        return path
-    # Fallback: most recently modified JSONL
+def find_session_jsonl(projects_dir):
+    """Most recently modified JSONL in the project dir wins."""
     files = sorted(glob.glob(os.path.join(projects_dir, "*.jsonl")),
                    key=os.path.getmtime, reverse=True)
     return files[0] if files else None
 
 
-def parse_session(jsonl_path, max_lines=800):
-    """Parse session JSONL for meaningful context data."""
+def parse_session(jsonl_path, max_lines=1500):
+    """Parse session JSONL for meaningful context data.
+
+    Returns full untruncated TG exchanges + file/tool metadata. Length capping
+    happens in build_summary at the section level, not here.
+    """
     with open(jsonl_path, "rb") as f:
         f.seek(0, 2)
         size = f.tell()
-        read_size = min(size, 3 * 1024 * 1024)
+        # Read up to 6MB tail so long sessions still get full last exchanges
+        read_size = min(size, 6 * 1024 * 1024)
         f.seek(size - read_size)
         tail = f.read().decode("utf-8", errors="replace")
 
@@ -70,12 +76,12 @@ def parse_session(jsonl_path, max_lines=800):
     if len(lines) > max_lines:
         lines = lines[-max_lines:]
 
-    telegram_replies = []     # What the assistant said via Telegram
-    user_requests = []        # What the user asked for
+    telegram_replies = []     # Assistant's full TG messages, in order
+    user_requests = []        # User's full TG messages, in order
     files_modified = []       # Files written/edited
-    git_commits = []          # Commit messages
-    tools_used = set()        # Unique tool names
-    topics = []               # Extracted topic keywords
+    tools_used = set()        # Unique tool names (excluding read-only)
+    topics = []               # Terminal-text excerpts (non-TG assistant output)
+    session_start_iso = None  # First timestamp in JSONL, used for git log cutoff
 
     for line in lines:
         try:
@@ -83,9 +89,13 @@ def parse_session(jsonl_path, max_lines=800):
         except json.JSONDecodeError:
             continue
 
+        # Capture the earliest timestamp we see for git log cutoff
+        ts = entry.get("timestamp")
+        if ts and not session_start_iso:
+            session_start_iso = ts
+
         entry_type = entry.get("type")
 
-        # Extract Telegram replies (the actual conversation)
         if entry_type == "assistant":
             msg = entry.get("message", {})
             content_list = msg.get("content", [])
@@ -100,113 +110,155 @@ def parse_session(jsonl_path, max_lines=800):
                     if name == "mcp__plugin_telegram_telegram__reply":
                         text = inp.get("text", "")
                         if text and len(text) > 20:
-                            telegram_replies.append(text[:400])
+                            telegram_replies.append(text)  # FULL, not sliced
                     elif name in ("Write", "Edit"):
                         fp = inp.get("file_path", "")
                         if fp and fp not in files_modified:
                             files_modified.append(fp)
-                    elif name == "Bash":
-                        cmd = inp.get("command", "")
-                        if "git commit" in cmd:
-                            m = re.search(r'-m\s+"([^"]+)"', cmd)
-                            if m:
-                                git_commits.append(m.group(1)[:120])
-                        tools_used.add("Bash")
                     elif name == "Agent":
                         desc = inp.get("description", "")
                         if desc:
                             tools_used.add(f"Agent({desc})")
-                    elif name not in ("Read", "Glob", "Grep", "ToolSearch"):
+                    elif name not in ("Read", "Glob", "Grep", "ToolSearch", "Bash"):
                         tools_used.add(name)
                 elif block.get("type") == "text":
                     text = block.get("text", "").strip()
                     if text and len(text) > 30 and not text.startswith("Waiting"):
-                        topics.append(text[:200])
+                        # Cap terminal-text snippets only (least important)
+                        topics.append(text[:MAX_PER_TOPIC_CHARS])
 
-        # User messages (requests)
         if entry_type == "user":
             msg = entry.get("message", {})
             content = msg.get("content", "")
             if isinstance(content, str) and content.strip():
+                # Real Telegram messages arrive wrapped in <channel> tags
                 tg_match = re.search(r'<channel[^>]*>(.*?)</channel>', content, re.DOTALL)
                 if tg_match:
                     tg_text = tg_match.group(1).strip()
-                    if tg_text and len(tg_text) > 5:
-                        user_requests.append(tg_text[:300])
+                    # Skip the auto-injected restore payloads (they begin with
+                    # "Context restore from") so we don't recursively echo old saves
+                    if tg_text and len(tg_text) > 5 and not tg_text.startswith("Context restore from"):
+                        user_requests.append(tg_text)  # FULL, not sliced
                 elif not content.startswith("<") and not content.startswith("[{"):
                     if len(content) > 10:
-                        user_requests.append(content[:300])
+                        user_requests.append(content)
 
     return {
-        "telegram_replies": telegram_replies[-30:],
-        "user_requests": user_requests[-30:],
+        "telegram_replies": telegram_replies,
+        "user_requests": user_requests,
         "files_modified": files_modified,
-        "git_commits": git_commits,
         "tools_used": sorted(tools_used)[:15],
-        "topics": topics[-10:],
+        "topics": topics[-5:],
+        "session_start_iso": session_start_iso,
     }
 
 
-def build_summary(parsed_data):
-    """Build a structured summary from parsed session data."""
+def get_recent_commits(session_start_iso):
+    """Pull commits via `git log` since the session began.
+
+    Replaces the old approach of regex-parsing `git commit -m "..."` from bash
+    invocations, which broke on heredoc syntax (`-m "$(cat <<'EOF'..."`) by
+    capturing the heredoc preamble instead of the actual commit body.
+
+    Runs against whatever git repo the current working directory is in. If
+    you're not in a repo, this silently returns [].
+    """
+    try:
+        if session_start_iso:
+            since = session_start_iso
+        else:
+            # Fallback: 6 hours, covers most sessions
+            since = "6 hours ago"
+        r = subprocess.run(
+            ["git", "log", f"--since={since}", "--pretty=format:%h %s"],
+            capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            return []
+        out = r.stdout.strip()
+        if not out:
+            return []
+        return [l for l in out.split("\n") if l.strip()]
+    except Exception:
+        return []
+
+
+def pair_exchanges(user_requests, telegram_replies):
+    """Zip user messages with assistant replies in order.
+
+    Best-effort pairing: if reply N is missing or extra, we still surface what
+    we have. The goal is human readability, not strict request/response logic.
+    """
+    pairs = []
+    n = max(len(user_requests), len(telegram_replies))
+    for i in range(n):
+        req = user_requests[i] if i < len(user_requests) else None
+        rep = telegram_replies[i] if i < len(telegram_replies) else None
+        pairs.append((req, rep))
+    return pairs
+
+
+def build_summary(parsed_data, recent_commits):
     sections = []
 
-    # What we were working on
-    sections.append("## What we worked on")
-    work_items = set()
-    for r in parsed_data["telegram_replies"]:
-        if any(kw in r.lower() for kw in ["fixed", "built", "added", "created", "updated", "removed", "wired"]):
-            first_sentence = r.split(".")[0].split("\n")[0]
-            if len(first_sentence) > 15:
-                work_items.add(first_sentence[:150])
-    if work_items:
-        for item in list(work_items)[-5:]:
-            sections.append(f"- {item}")
-    elif parsed_data["git_commits"]:
-        for c in parsed_data["git_commits"][-3:]:
-            sections.append(f"- {c}")
-    else:
-        sections.append("- (no clear work items extracted)")
+    pairs = pair_exchanges(parsed_data["user_requests"], parsed_data["telegram_replies"])
 
-    # Key exchanges
+    # 1. Last exchange — FULL text, both sides. Most important section.
+    sections.append("## Last exchange (full)")
+    if pairs:
+        last_req, last_rep = pairs[-1]
+        if last_req:
+            sections.append(f"**User:** {last_req}")
+            sections.append("")
+        if last_rep:
+            sections.append(f"**Assistant:** {last_rep}")
+    else:
+        sections.append("(no exchanges captured)")
+
+    # 2. Recent exchanges (preceding the last one) — paired, fuller text.
     sections.append("")
-    sections.append("## Key exchanges")
-    exchanges = []
-    requests = parsed_data["user_requests"][-10:]
-    for req in requests[-5:]:
-        short = req.split("\n")[0][:120]
-        if len(short) > 10:
-            exchanges.append(f"- User: {short}")
-    if exchanges:
-        sections.extend(exchanges[-5:])
+    sections.append("## Recent exchanges")
+    earlier = pairs[:-1] if len(pairs) > 1 else []
+    if earlier:
+        budget = MAX_RECENT_EXCHANGE_CHARS
+        rendered = []
+        for req, rep in reversed(earlier):  # newest of the earlier first
+            entry_lines = []
+            if req:
+                entry_lines.append(f"- **User:** {req}")
+            if rep:
+                entry_lines.append(f"  **Assistant:** {rep}")
+            entry = "\n".join(entry_lines)
+            if not entry:
+                continue
+            if len(entry) > budget:
+                break
+            rendered.append(entry)
+            budget -= len(entry)
+        # Restore chronological order (oldest first)
+        sections.extend(reversed(rendered))
     else:
-        sections.append("- (no exchanges captured)")
+        sections.append("(no earlier exchanges)")
 
-    # Files changed
+    # 3. Files changed in this session
     if parsed_data["files_modified"]:
         sections.append("")
         sections.append("## Files changed")
         home = os.path.expanduser("~")
-        for f in parsed_data["files_modified"][:10]:
-            short = f.replace(home, "~")
-            sections.append(f"- {short}")
+        for f in parsed_data["files_modified"][:20]:
+            sections.append(f"- {f.replace(home, '~')}")
 
-    # Git commits
-    if parsed_data["git_commits"]:
+    # 4. Commits — straight from `git log`, not regex'd from bash
+    if recent_commits:
         sections.append("")
         sections.append("## Commits")
-        for c in parsed_data["git_commits"][-5:]:
+        for c in recent_commits[:10]:
             sections.append(f"- {c}")
 
-    # Where we left off
-    sections.append("")
-    sections.append("## Where we left off")
-    if parsed_data["user_requests"]:
-        last = parsed_data["user_requests"][-1].split("\n")[0][:200]
-        sections.append(f"Last from user: {last}")
-    if parsed_data["telegram_replies"]:
-        last = parsed_data["telegram_replies"][-1].split("\n")[0][:200]
-        sections.append(f"Last from assistant: {last}")
+    # 5. Tools/agents that ran (handy for jogging memory of subagent work)
+    if parsed_data["tools_used"]:
+        sections.append("")
+        sections.append("## Tools/agents invoked")
+        sections.append(", ".join(parsed_data["tools_used"]))
 
     return "\n".join(sections)
 
@@ -225,17 +277,15 @@ def main():
         print("Set PROJECTS_DIR at the top of session-save.py.")
         sys.exit(1)
 
-    # Use most recently modified JSONL as the active session
-    jsonl_files = sorted(glob.glob(os.path.join(projects_dir, "*.jsonl")),
-                         key=os.path.getmtime, reverse=True)
-    if not jsonl_files:
+    jsonl_path = find_session_jsonl(projects_dir)
+    if not jsonl_path:
         print("ERROR: No session JSONL files found")
         sys.exit(1)
-    jsonl_path = jsonl_files[0]
     session_id = os.path.basename(jsonl_path).replace(".jsonl", "")
 
     parsed = parse_session(jsonl_path)
-    summary = build_summary(parsed)
+    commits = get_recent_commits(parsed["session_start_iso"])
+    summary = build_summary(parsed, commits)
 
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     header = f"# Session Save: {label}\n**Saved:** {now} | **Session:** {session_id[:8]}\n\n"
@@ -245,7 +295,11 @@ def main():
     with open(save_path, "w") as f:
         f.write(content)
 
-    print(f"Saved '{label}' ({len(content)} chars, {len(parsed['telegram_replies'])} TG replies, {len(parsed['files_modified'])} files)")
+    print(f"Saved '{label}' ({len(content)} chars, "
+          f"{len(parsed['telegram_replies'])} TG replies, "
+          f"{len(parsed['user_requests'])} user msgs, "
+          f"{len(parsed['files_modified'])} files, "
+          f"{len(commits)} commits)")
 
 
 if __name__ == "__main__":

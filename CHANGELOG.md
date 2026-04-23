@@ -1,5 +1,16 @@
 # Changelog
 
+## v3.2.1 - 2026-04-22
+
+Security hardening pass. No functional changes; all fixes are defense-in-depth after a Shield security review of v3.2.0.
+
+### Security
+- **Write-time channel-tag neutralization in `session-save.py`.** Captured Telegram content is now sanitized before being written to a brief: control characters stripped, literal `<channel` and `</channel>` tokens rewritten to `<_channel` / `</_channel>` so they cannot forge an inbound frame with a different `user_id` when the brief is later wrapped and restored. Prior on-disk briefs remain readable (the sanitizer is also applied on read in `telegram-commander.py` for defense in depth).
+- **Read-time sanitization in `telegram-commander.py`.** `cmd_restore` and `cmd_refresh` now run the restored brief through the same neutralizer before wrapping it in a `<channel>` tag and pasting into tmux, so older unsanitized briefs on disk cannot bypass the fix.
+- **Label validation.** `session-save.py` and `session-restore.py` now reject labels not matching `^[a-z0-9][a-z0-9_-]*$`. Closes a path-traversal vector where a label like `../../foo` could escape `SAVE_DIR` on save or partial-match a file outside `SAVE_DIR` on restore.
+- **`saved-contexts/` added to `.gitignore`.** A careless `git add .` on a live install cannot accidentally push session briefs to the public repo.
+- **Security Model section added to README.** Documents the trust boundary (allowlisted Telegram user ID is the only authentication), blast radius when that allowlist is breached, existing hardening, hardening the user can add, and what the project does NOT protect against.
+
 ## v3.2.0 - 2026-04-22
 
 ### Added

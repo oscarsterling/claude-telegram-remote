@@ -24,6 +24,35 @@ SAVE_DIR = os.path.expanduser("~/claude-telegram-remote/saved-contexts")
 
 SESSIONS_DIR = os.path.expanduser("~/.claude/sessions")
 
+# Labels must look like `[a-z0-9_-]+`. Anything else is rejected rather than
+# silently scrubbed so the caller sees a clear error instead of writing
+# somewhere they didn't expect.
+LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
+# Control chars and channel-tag neutralization. Saved briefs are later
+# wrapped in a synthetic <channel> frame and tmux-pasted back into Claude,
+# so any literal `<channel` or `</channel>` in captured content could forge
+# a frame with a different user_id. Defuse at write time.
+_CHANNEL_OPEN_RE = re.compile(r"<channel", re.IGNORECASE)
+_CHANNEL_CLOSE_RE = re.compile(r"</channel>", re.IGNORECASE)
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _neutralize(text):
+    """Strip control chars and break any literal channel tags.
+
+    The defuse inserts an underscore between `<` and `channel` so tag-shaped
+    tokens are still human-readable in the brief but no longer match as an
+    inbound <channel> frame (regexes like `<channel\\s` fail on `<_channel`).
+    """
+    if not isinstance(text, str):
+        return text
+    text = _CONTROL_RE.sub("", text)
+    text = _CHANNEL_OPEN_RE.sub("<_channel", text)
+    text = _CHANNEL_CLOSE_RE.sub("</_channel>", text)
+    return text
+
+
 # Section budgets in chars. Generous so individual messages aren't sliced.
 # Aim: total file under ~16KB so the tmux paste in !refresh stays reliable.
 MAX_LAST_EXCHANGE_CHARS = 4000   # full user + full assistant at the tail
@@ -110,7 +139,7 @@ def parse_session(jsonl_path, max_lines=1500):
                     if name == "mcp__plugin_telegram_telegram__reply":
                         text = inp.get("text", "")
                         if text and len(text) > 20:
-                            telegram_replies.append(text)  # FULL, not sliced
+                            telegram_replies.append(_neutralize(text))  # FULL, but defused
                     elif name in ("Write", "Edit"):
                         fp = inp.get("file_path", "")
                         if fp and fp not in files_modified:
@@ -138,10 +167,10 @@ def parse_session(jsonl_path, max_lines=1500):
                     # Skip the auto-injected restore payloads (they begin with
                     # "Context restore from") so we don't recursively echo old saves
                     if tg_text and len(tg_text) > 5 and not tg_text.startswith("Context restore from"):
-                        user_requests.append(tg_text)  # FULL, not sliced
+                        user_requests.append(_neutralize(tg_text))  # FULL, but defused
                 elif not content.startswith("<") and not content.startswith("[{"):
                     if len(content) > 10:
-                        user_requests.append(content)
+                        user_requests.append(_neutralize(content))
 
     return {
         "telegram_replies": telegram_replies,
@@ -269,6 +298,9 @@ def main():
         sys.exit(1)
 
     label = sys.argv[1].strip().replace(" ", "-").lower()
+    if not LABEL_RE.match(label):
+        print(f"ERROR: invalid label {label!r}. Use [a-z0-9_-] only, no path separators.")
+        sys.exit(2)
     os.makedirs(SAVE_DIR, exist_ok=True)
 
     projects_dir = _detect_projects_dir()

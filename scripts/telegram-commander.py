@@ -4,12 +4,32 @@ import inspect
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
+
+# Sanitizer for restored briefs. Saved briefs from recent session-save.py
+# versions already neutralize channel tags at write time, but older on-disk
+# briefs may not, and defense in depth is cheap. Strip control chars and
+# break any literal <channel> tokens so a restored brief cannot forge a
+# new inbound frame with a different user_id once it's wrapped and tmux
+# pasted back into the fresh Claude session.
+_BRIEF_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_BRIEF_CHANNEL_OPEN_RE = re.compile(r"<channel", re.IGNORECASE)
+_BRIEF_CHANNEL_CLOSE_RE = re.compile(r"</channel>", re.IGNORECASE)
+
+
+def _sanitize_brief(text):
+    if not isinstance(text, str):
+        return text
+    text = _BRIEF_CONTROL_RE.sub("", text)
+    text = _BRIEF_CHANNEL_OPEN_RE.sub("<_channel", text)
+    text = _BRIEF_CHANNEL_CLOSE_RE.sub("</_channel>", text)
+    return text
 
 # === CONFIGURE THESE ===
 YOUR_USER_ID = 0  # Your Telegram user ID (get it from @userinfobot)
@@ -475,10 +495,12 @@ def cmd_restore(args=""):
             cwd=REPO_DIR)
         if r.returncode != 0:
             return r.stdout.strip() or r.stderr.strip() or "Restore failed."
-        brief = r.stdout.strip()
+        brief = _sanitize_brief(r.stdout.strip())
         if not brief:
             return "Restore returned empty content."
-        # Inject wrapped in channel tags so Claude treats it as a Telegram message
+        # Inject wrapped in channel tags so Claude treats it as a Telegram message.
+        # brief is pre-sanitized above so nested <channel> tokens cannot
+        # forge a new inbound frame with a different user_id.
         inject_msg = (
             '<channel source="plugin:telegram:telegram" chat_id="'
             + str(YOUR_USER_ID)
@@ -532,7 +554,7 @@ def cmd_refresh(args=""):
             cwd=REPO_DIR)
         if r.returncode != 0:
             return f"Refresh partial: saved + reset done, but restore failed. Use !restore {label} manually."
-        brief = r.stdout.strip()
+        brief = _sanitize_brief(r.stdout.strip())
         if not brief:
             return f"Refresh partial: saved + reset done, but restore empty. Use !restore {label} manually."
         inject_msg = (

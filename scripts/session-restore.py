@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """Restore a saved session context brief."""
-import os, sys
+import os, re, sys
 
 SAVE_DIR = os.path.expanduser("~/claude-telegram-remote/saved-contexts")
+
+# Labels are exact-or-substring matched against filenames in SAVE_DIR.
+# Restrict to plain alnum + underscore + hyphen so a caller cannot pass
+# `../somewhere` or `.hidden` and reach outside SAVE_DIR.
+LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 
 def main():
@@ -11,6 +16,9 @@ def main():
         sys.exit(1)
 
     label = sys.argv[1].strip().replace(" ", "-").lower()
+    if not LABEL_RE.match(label):
+        print(f"ERROR: invalid label {label!r}. Use [a-z0-9_-] only, no path separators.")
+        sys.exit(2)
     save_path = os.path.join(SAVE_DIR, f"{label}.md")
 
     if not os.path.exists(save_path):

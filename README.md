@@ -1,6 +1,6 @@
 # claude-telegram-remote
 
-**v3.2** (April 22, 2026). Control Claude Code from your phone via Telegram. 23 commands, interactive checkpoint rollback, session save/restore/refresh, a typing indicator, a deterministic Stop-hook, and inline button pickers.
+**v3.2.1** (April 22, 2026). Control Claude Code from your phone via Telegram. 23 commands, interactive checkpoint rollback, session save/restore/refresh, a typing indicator, a deterministic Stop-hook, and inline button pickers.
 
 ![Hero](assets/hero.png)
 
@@ -318,6 +318,33 @@ Pattern:
 Nightly cron restarts never create the flag, so scheduled resets stay silent. Only `!restart` (manual) triggers the ping.
 
 See `cmd_restart()` in `scripts/telegram-commander.py` for the skeleton.
+
+## Security Model
+
+Read this once before you point a Telegram account at a machine running Claude Code in bypass mode.
+
+**Trust boundary.** The allowlisted Telegram user ID is the ONLY authentication between "someone sending a message" and "Claude Code executing code on your machine." There is no second factor. A compromised Telegram account, a stolen session token, or an attacker who sits down at an unlocked phone has the same authority as you do.
+
+**Blast radius when the allowlist is breached.** The command daemon passes `!command` arguments as keystrokes into the tmux session. If Claude Code is running with `--dangerously-skip-permissions`, those keystrokes become unrestricted code execution: file reads, writes, network calls, commits, secret exfiltration. `!restart` can spawn arbitrary processes via the restart script. `!resume` can attach to any prior conversation. `!restore` can inject content wrapped in a `<channel>` frame that Claude treats as a real Telegram message.
+
+**What the project does to reduce that risk.**
+- Allowlist is exact-match integer compare (`user_id == YOUR_USER_ID`), not a pattern.
+- `!save` and `!restore` labels are validated as `[a-z0-9_-]+` before they reach the filesystem.
+- Restored briefs are sanitized before re-injection: control chars stripped, literal `<channel` tokens neutralized, so a hostile inbound message cannot plant a payload that forges a different-user frame on the next `!refresh`.
+- Keychain holds both bot tokens (not environment vars or config files).
+- `saved-contexts/` is in `.gitignore` so a careless `git add .` on a live install cannot push session briefs.
+
+**What you can do to harden further.**
+- Use a dedicated Telegram account for the command bot instead of your personal one.
+- Enable Telegram's two-step verification and lock your phone screen.
+- Set `ALLOWED_USERS` (if you fork to multi-user) as a tiny list, not a wildcard.
+- Audit `saved-contexts/` before sharing your machine; briefs contain conversation content and file paths.
+- Consider running Claude Code without `--dangerously-skip-permissions` if your workflow permits; the daemon still works, it just makes each tool call prompt you in the tmux pane.
+
+**What the project does NOT protect against.**
+- Prompt injection through normal Telegram messages is a product-level concern of Claude Code itself; the daemon just relays text.
+- A physically present attacker with access to the tmux session has the same authority as `!commands`.
+- Malicious plugins installed in `~/.claude/plugins/` are not sandboxed by this project.
 
 ## Credits
 

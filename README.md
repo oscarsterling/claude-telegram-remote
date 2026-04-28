@@ -1,6 +1,6 @@
 # claude-telegram-remote
 
-**v3.2.1** (April 22, 2026). Control Claude Code from your phone via Telegram. 23 commands, interactive checkpoint rollback, session save/restore/refresh, a typing indicator, a deterministic Stop-hook, and inline button pickers.
+**v3.2.2** (April 28, 2026). Control Claude Code from your phone via Telegram. 23 commands, interactive checkpoint rollback, session save/restore/refresh, a typing indicator, a deterministic Stop-hook, and inline button pickers.
 
 ![Hero](assets/hero.png)
 

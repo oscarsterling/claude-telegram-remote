@@ -14,12 +14,17 @@ v3.2 changes vs the earlier compression-first implementation:
 - Output leads with the last full exchange (both sides), then earlier paired
   exchanges, then files/commits/tools. Easier to resume from.
 """
-import json, os, sys, glob, subprocess, datetime, re
+import json, os, sys, glob, subprocess, datetime, re, time
 
 # === CONFIGURE THESE ===
 # Auto-detect the Claude projects directory. Override if your layout differs.
 PROJECTS_DIR = ""  # Leave empty for auto-detect, or set to your .claude/projects/... path
 SAVE_DIR = os.path.expanduser("~/claude-telegram-remote/saved-contexts")
+# Retention for auto-named refresh saves. Auto-named files (refresh-*) are
+# timestamp-keyed and lose value within hours, so this is generous. Custom
+# labels (anything not refresh-*) are never pruned - those are caller-chosen
+# and deliberate. Added in v3.2.2 to bound saved-contexts/ growth.
+REFRESH_RETENTION_DAYS = 14
 # =======================
 
 SESSIONS_DIR = os.path.expanduser("~/.claude/sessions")
@@ -292,6 +297,33 @@ def build_summary(parsed_data, recent_commits):
     return "\n".join(sections)
 
 
+def prune_old_refresh_saves(retention_days=REFRESH_RETENTION_DAYS):
+    """Delete refresh-*.md files older than retention_days. Returns count
+    pruned. Non-refresh saves (custom labels) are kept forever.
+
+    Run at the start of each save so the dir is self-maintaining and we
+    don't need a separate cron. Failures are non-fatal — pruning never
+    blocks a real save."""
+    if not os.path.isdir(SAVE_DIR):
+        return 0
+    cutoff = time.time() - retention_days * 86400
+    pruned = 0
+    try:
+        for fname in os.listdir(SAVE_DIR):
+            if not fname.startswith("refresh-") or not fname.endswith(".md"):
+                continue
+            fpath = os.path.join(SAVE_DIR, fname)
+            try:
+                if os.path.getmtime(fpath) < cutoff:
+                    os.unlink(fpath)
+                    pruned += 1
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return pruned
+
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: session-save.py <label>")
@@ -302,6 +334,7 @@ def main():
         print(f"ERROR: invalid label {label!r}. Use [a-z0-9_-] only, no path separators.")
         sys.exit(2)
     os.makedirs(SAVE_DIR, exist_ok=True)
+    pruned = prune_old_refresh_saves()
 
     projects_dir = _detect_projects_dir()
     if not projects_dir:
@@ -327,11 +360,12 @@ def main():
     with open(save_path, "w") as f:
         f.write(content)
 
+    prune_suffix = f" pruned={pruned}" if pruned else ""
     print(f"Saved '{label}' ({len(content)} chars, "
           f"{len(parsed['telegram_replies'])} TG replies, "
           f"{len(parsed['user_requests'])} user msgs, "
           f"{len(parsed['files_modified'])} files, "
-          f"{len(commits)} commits)")
+          f"{len(commits)} commits){prune_suffix}")
 
 
 if __name__ == "__main__":

@@ -470,7 +470,7 @@ def cmd_save(args=""):
     label = args.strip() if args.strip() else _dt.datetime.now().strftime("auto-%Y%m%d-%H%M")
     try:
         r = subprocess.run(
-            ["python3", os.path.join(os.path.dirname(__file__), "session-save.py"), label],
+            [sys.executable, os.path.join(os.path.dirname(__file__), "session-save.py"), label],
             capture_output=True, text=True, timeout=60,
             cwd=REPO_DIR)
         output = r.stdout.strip()
@@ -490,7 +490,7 @@ def cmd_restore(args=""):
         return "Usage: !restore <label>. Use !contexts to see saved contexts."
     try:
         r = subprocess.run(
-            ["python3", os.path.join(os.path.dirname(__file__), "session-restore.py"), label],
+            [sys.executable, os.path.join(os.path.dirname(__file__), "session-restore.py"), label],
             capture_output=True, text=True, timeout=10,
             cwd=REPO_DIR)
         if r.returncode != 0:
@@ -518,45 +518,157 @@ def cmd_restore(args=""):
         return f"Restore failed: {e}"
 
 
+SAVED_CONTEXTS_DIR = os.path.join(REPO_DIR, "saved-contexts")
+
+
+def _inject_refresh_failure_notice(label, step, save_path, save_result, restore_result, extra=""):
+    """Push a diagnostic <channel> block into the post-/reset session so the
+    fresh session boots aware that the refresh round-trip failed.
+
+    Added in v3.2.2 after the launchd-PATH-shim ghost: the daemon logged
+    "Refresh complete" but no save file ever landed on disk, and the new
+    session got the failure stdout pasted back as if it were valid restored
+    content. Without this notice, the new session sees nothing actionable.
+    """
+    def _trim(s, n=300):
+        if not s:
+            return ""
+        s = s.strip()
+        return (s[:n] + "...") if len(s) > n else s
+
+    file_exists = os.path.exists(save_path) if save_path else False
+    save_rc = save_result.returncode if save_result is not None else None
+    save_out = _trim(save_result.stdout) if save_result is not None else ""
+    save_err = _trim(save_result.stderr) if save_result is not None else ""
+    restore_rc = restore_result.returncode if restore_result is not None else None
+    restore_out = _trim(restore_result.stdout) if restore_result is not None else ""
+    restore_err = _trim(restore_result.stderr) if restore_result is not None else ""
+
+    body_lines = [
+        f"REFRESH FAILED at step '{step}' for label '{label}'.",
+        f"Expected save file: {save_path} (exists={file_exists}).",
+        f"save: rc={save_rc} stdout={save_out!r} stderr={save_err!r}",
+        f"restore: rc={restore_rc} stdout={restore_out!r} stderr={restore_err!r}",
+    ]
+    if extra:
+        body_lines.append(f"extra: {extra}")
+    body_lines.extend([
+        "Places to look:",
+        "  scripts/session-save.py (writes save file)",
+        "  scripts/session-restore.py (reads save file)",
+        "  scripts/telegram-commander.py cmd_refresh",
+        "  commander.log around the failure timestamp",
+        "Recommended first step: re-run save manually with this label and inspect filesystem:",
+        f"  python3 scripts/session-save.py {label}",
+        f"  ls -la {save_path}",
+    ])
+    msg_body = " ".join(body_lines)
+    inject_msg = (
+        '<channel source="plugin:telegram:telegram" chat_id="'
+        + str(YOUR_USER_ID)
+        + '" message_id="0" user="user" user_id="'
+        + str(YOUR_USER_ID)
+        + '" ts="">'
+        + msg_body
+        + '</channel>'
+    )
+    return inject_slash_command(inject_msg)
+
+
 def cmd_refresh(args=""):
-    """Save context, reset CC, restore context. Full refresh in one command."""
+    """Save context, reset CC, restore context. Full refresh in one command.
+
+    v3.2.2 hardening pass after the launchd-PATH-shim ghost:
+      - Verify save FILE EXISTS after save subprocess returns 0 (catches the
+        case where the script lies about success).
+      - Log full stdout/stderr for save and restore at INFO/ERROR.
+      - On any post-/reset failure, inject a <channel> diagnostic into the
+        new session so the fresh session knows the round-trip failed and
+        where to look.
+      - Defense-in-depth: if restore stdout matches a known failure string
+        ("No saved context found") despite rc=0, treat as failure.
+    """
     import datetime as _dt
     label = "refresh-" + _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    steps = []
+    save_path = os.path.join(SAVED_CONTEXTS_DIR, f"{label}.md")
+    save_result = None
 
     # Step 1: Save
     try:
-        r = subprocess.run(
-            ["python3", os.path.join(os.path.dirname(__file__), "session-save.py"), label],
+        save_result = subprocess.run(
+            [sys.executable, os.path.join(os.path.dirname(__file__), "session-save.py"), label],
             capture_output=True, text=True, timeout=60,
             cwd=REPO_DIR)
-        if r.returncode != 0:
-            return f"Refresh aborted: save failed. {r.stderr.strip()}"
-        steps.append("saved")
+        if save_result.returncode != 0:
+            logging.error(
+                "session-save FAILED label=%s rc=%d stdout=%r stderr=%r",
+                label, save_result.returncode,
+                save_result.stdout.strip()[:400], save_result.stderr.strip()[:400])
+            return f"Refresh aborted: save failed (rc={save_result.returncode}). stderr={save_result.stderr.strip()[:200]}"
+        logging.info(
+            "session-save OK label=%s stdout=%s",
+            label, save_result.stdout.strip()[:200])
     except Exception as e:
-        return f"Refresh aborted: save failed. {e}"
+        logging.exception("session-save subprocess crashed label=%s", label)
+        return f"Refresh aborted: save subprocess crashed. {e}"
 
-    # Step 2: Reset
+    # Step 1b: VERIFY the save file actually landed on disk. Without this
+    # check, /reset fires anyway and the new session gets the restore failure
+    # stdout pasted in as if it were valid content (the v3.2.2 ghost).
+    if not os.path.exists(save_path):
+        logging.error(
+            "session-save lied: rc=0 but file missing label=%s path=%s stdout=%r stderr=%r",
+            label, save_path,
+            save_result.stdout.strip()[:400],
+            save_result.stderr.strip()[:400])
+        return (
+            f"Refresh aborted: save returned rc=0 but file is missing at "
+            f"{save_path}. Not running /reset - your session is preserved. "
+            f"stderr={save_result.stderr.strip()[:400]!r} "
+            f"Investigate session-save.py."
+        )
+
+    # Step 2: Reset (only after save is verified on disk)
     time.sleep(1)
     result = inject_slash_command("/reset")
     if result != "sent":
         return f"Refresh aborted: reset failed. {result}"
-    steps.append("reset sent")
 
     # Step 3: Wait for fresh prompt
     time.sleep(3)
 
     # Step 4: Restore
+    restore_result = None
     try:
-        r = subprocess.run(
-            ["python3", os.path.join(os.path.dirname(__file__), "session-restore.py"), label],
+        restore_result = subprocess.run(
+            [sys.executable, os.path.join(os.path.dirname(__file__), "session-restore.py"), label],
             capture_output=True, text=True, timeout=10,
             cwd=REPO_DIR)
-        if r.returncode != 0:
-            return f"Refresh partial: saved + reset done, but restore failed. Use !restore {label} manually."
-        brief = _sanitize_brief(r.stdout.strip())
+        if restore_result.returncode != 0:
+            logging.error(
+                "session-restore FAILED label=%s rc=%d stdout=%r stderr=%r",
+                label, restore_result.returncode,
+                restore_result.stdout.strip()[:400], restore_result.stderr.strip()[:400])
+            _inject_refresh_failure_notice(label, "restore", save_path, save_result, restore_result)
+            return f"Refresh partial: saved + reset done, but restore failed (rc={restore_result.returncode}). Failure notice injected into new session. Use !restore {label} manually."
+        brief = _sanitize_brief(restore_result.stdout.strip())
         if not brief:
-            return f"Refresh partial: saved + reset done, but restore empty. Use !restore {label} manually."
+            logging.error("session-restore returned empty stdout label=%s", label)
+            _inject_refresh_failure_notice(
+                label, "restore-empty", save_path, save_result, restore_result,
+                extra="restore returned rc=0 but empty stdout")
+            return f"Refresh partial: saved + reset done, but restore empty. Failure notice injected. Use !restore {label} manually."
+        # Defense-in-depth: if restore stdout looks like a failure string
+        # despite rc=0, treat as failure. Prevents the v3.2.2 ghost from
+        # re-occurring if returncode propagation ever breaks again.
+        if "No saved context found" in brief or brief.startswith("Multiple matches:"):
+            logging.error(
+                "session-restore stdout looks like failure text despite rc=%d label=%s stdout=%r",
+                restore_result.returncode, label, brief[:400])
+            _inject_refresh_failure_notice(
+                label, "restore-mismatch", save_path, save_result, restore_result,
+                extra="rc=0 but stdout matches a failure pattern")
+            return f"Refresh partial: restore stdout looks like a failure message. Failure notice injected. Use !restore {label} manually."
         inject_msg = (
             '<channel source="plugin:telegram:telegram" chat_id="'
             + str(YOUR_USER_ID)
@@ -567,12 +679,18 @@ def cmd_refresh(args=""):
             + '</channel>'
         )
         inject_result = inject_slash_command(inject_msg)
-        if inject_result == "sent":
-            steps.append("restored")
-        else:
-            return f"Refresh partial: saved + reset done, inject failed. Use !restore {label} manually."
+        if inject_result != "sent":
+            logging.error("inject_slash_command failed for refresh restore label=%s result=%s", label, inject_result)
+            _inject_refresh_failure_notice(
+                label, "inject", save_path, save_result, restore_result,
+                extra=f"inject_slash_command returned {inject_result!r}")
+            return f"Refresh partial: saved + reset done, inject failed ({inject_result}). Use !restore {label} manually."
     except Exception as e:
-        return f"Refresh partial: saved + reset done, restore error: {e}. Use !restore {label} manually."
+        logging.exception("restore subprocess crashed label=%s", label)
+        _inject_refresh_failure_notice(
+            label, "restore-exception", save_path, save_result, restore_result,
+            extra=f"exception={e!r}")
+        return f"Refresh partial: saved + reset done, restore error: {e}. Failure notice injected. Use !restore {label} manually."
 
     return f"Refresh complete ({label}). Saved, reset, restored."
 
@@ -581,7 +699,7 @@ def cmd_contexts(args=""):
     """List all saved session contexts."""
     try:
         r = subprocess.run(
-            ["python3", os.path.join(os.path.dirname(__file__), "session-list.py")],
+            [sys.executable, os.path.join(os.path.dirname(__file__), "session-list.py")],
             capture_output=True, text=True, timeout=10,
             cwd=REPO_DIR)
         return r.stdout.strip() or "No saved contexts."
@@ -666,6 +784,19 @@ def main():
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+
+    # Startup diagnostic: log the Python interpreter and what 'python3' on the
+    # daemon's PATH would resolve to. Added in v3.2.2 after the launchd PATH
+    # shim ghost: launchd hands daemons a minimal PATH (/usr/bin:/bin:...) so
+    # subprocess.run(["python3", ...]) was hitting Apple's Command Line Tools
+    # shim, which exits 0 silently in non-interactive context. All subprocess
+    # Python calls now use sys.executable explicitly; this log line confirms
+    # the daemon's interpreter and surfaces any future PATH drift.
+    import shutil as _shutil
+    logging.info(
+        "Interpreter: sys.executable=%s sys.version=%s shutil.which('python3')=%s PATH=%s",
+        sys.executable, sys.version.split()[0],
+        _shutil.which("python3"), os.environ.get("PATH", "<unset>"))
 
     token = get_bot_token()
     register_bot_commands(token)

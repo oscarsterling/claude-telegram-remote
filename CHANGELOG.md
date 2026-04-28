@@ -1,5 +1,26 @@
 # Changelog
 
+## v3.2.2 - 2026-04-28
+
+Critical fix: `!refresh` was silently failing on macOS launchd-managed installs because subprocess Python lookups via `PATH` resolved to Apple's Command Line Tools shim, which exits 0 with no output in non-interactive subprocess context. Save never ran. Restore never ran. The daemon logged "Refresh complete" while no save file ever landed on disk, and the new session got the failure stdout pasted in as if it were valid restored content.
+
+### Fixed
+- **`!refresh` ghost on launchd installs.** Migrated all 5 `subprocess.run(["python3", ...])` callsites in `telegram-commander.py` to `[sys.executable, ...]`. `sys.executable` is the absolute path of the daemon's own interpreter, bypassing PATH lookup entirely so the launchd shim can never intercept.
+- **Save success without disk write.** `cmd_refresh` now verifies the save file exists on disk after the save subprocess returns rc=0, BEFORE firing /reset. If the file is missing, abort with a clear message and the running session is preserved. The previous behavior was to /reset anyway, destroying the session for nothing.
+
+### Added
+- **Failure-notice injection on post-/reset errors.** When restore fails after /reset has fired, `cmd_refresh` now injects a `<channel>` diagnostic block into the new session naming the failing step, save path, full stdout/stderr from save and restore, and the files to investigate. The fresh session boots aware that the round-trip failed and where to look.
+- **Defense-in-depth on restore output.** If restore stdout matches a known failure string (e.g. "No saved context found") despite rc=0, treat as failure and inject the diagnostic. Prevents future regressions if returncode propagation ever breaks again.
+- **Full subprocess stdout/stderr logging.** `cmd_refresh` now logs both streams at INFO/ERROR for save and restore, so commander.log preserves full diagnostic output instead of silently dropping it.
+- **Startup interpreter diagnostic.** Daemon logs `sys.executable`, `sys.version`, `shutil.which('python3')`, and `PATH` at startup so any future PATH drift surfaces immediately on respawn.
+
+### Changed
+- **`session-restore.py` exact-match only.** Dropped the partial-substring fallback (`if label in f`). Previous behavior would silently load the wrong file if the caller passed a truncated or substring-matching label. Use `!contexts` to discover full labels. LABEL_RE validation unchanged.
+- **`session-save.py` retention.** `refresh-*.md` files older than 14 days are pruned at the start of each save. Custom-labelled saves are never pruned. Self-maintaining, no new cron needed. The dir was unbounded before.
+
+### Notes
+The launchd PATH issue affects any install where `telegram-commander.py` is run by `launchd` (the documented production path on macOS). Interactive shell invocations were unaffected because the user's PATH includes `/opt/homebrew/bin` (Homebrew Python). If you've been running the commander manually in a tmux pane and only recently moved to launchd, this fix is the missing piece.
+
 ## v3.2.1 - 2026-04-22
 
 Security hardening pass. No functional changes; all fixes are defense-in-depth after a Shield security review of v3.2.0.

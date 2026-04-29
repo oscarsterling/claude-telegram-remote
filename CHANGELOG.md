@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.2.3 - 2026-04-28
+
+Follow-up to v3.2.2: the new defense-in-depth check itself had a bug. The substring match `"No saved context found" in brief` fired against a HEALTHY restore whose body legitimately quoted that string in commentary about a previously-fixed bug, injecting a false-positive `restore-mismatch` failure notice over real restored context.
+
+### Fixed
+- **`!refresh` false-positive on healthy save bodies.** Anchored the failure-string check in `cmd_refresh` to `brief.startswith(...)` instead of substring `in`. `session-restore.py` always prints these strings as the entire stdout before `sys.exit(1)`, so they appear at offset 0 on real failure - never mid-body. A successful restore that quotes the failure string in historical commentary no longer trips the check. (`Multiple matches:` already used `startswith`; only the `No saved context found` branch was leaky.)
+
 ## v3.2.2 - 2026-04-28
 
 Critical fix: `!refresh` was silently failing on macOS launchd-managed installs because subprocess Python lookups via `PATH` resolved to Apple's Command Line Tools shim, which exits 0 with no output in non-interactive subprocess context. Save never ran. Restore never ran. The daemon logged "Refresh complete" while no save file ever landed on disk, and the new session got the failure stdout pasted in as if it were valid restored content.

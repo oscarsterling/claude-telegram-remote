@@ -661,7 +661,14 @@ def cmd_refresh(args=""):
         # Defense-in-depth: if restore stdout looks like a failure string
         # despite rc=0, treat as failure. Prevents the v3.2.2 ghost from
         # re-occurring if returncode propagation ever breaks again.
-        if "No saved context found" in brief or brief.startswith("Multiple matches:"):
+        # v3.2.3: anchor to startswith, NOT substring. session-restore.py
+        # prints these strings as the entire stdout before sys.exit(1), so
+        # they always appear at offset 0 on real failure. A successful
+        # restore prints the whole save file, which may legitimately quote
+        # the failure string in historical commentary - the v3.2.2 substring
+        # check fired against a healthy save that mentioned the bug it had
+        # just fixed, injecting a false-positive failure notice.
+        if brief.startswith("No saved context found") or brief.startswith("Multiple matches:"):
             logging.error(
                 "session-restore stdout looks like failure text despite rc=%d label=%s stdout=%r",
                 restore_result.returncode, label, brief[:400])

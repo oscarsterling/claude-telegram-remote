@@ -147,18 +147,64 @@ def cmd_restart():
         return f"Restart failed: {e}"
 
 
-def inject_slash_command(slash_cmd):
-    """Inject a slash command into the running Claude Code tmux session."""
+def inject_slash_command(slash_cmd, pre_clear=True):
+    """Inject a slash command into the running Claude Code tmux session.
+
+    pre_clear: send Escape, 0.4s, Escape, 0.4s, Enter, 0.5s before the slash
+    text to drop out of any open picker or popup and clear stale text in CC's
+    input box. Default True for the common case where the input may not be
+    empty. Set False when the caller knows the input is already clean (e.g.
+    cmd_refresh's post-/reset restore inject, where /reset just spawned a
+    fresh session with an empty input by definition).
+
+    The Escape Escape pair drops CC out of any open picker. The 0.4s gap
+    between the two escapes matters: CC's Ink-based input has a render cycle,
+    and sending two Escapes faster than that landed on stale frames in
+    testing.
+
+    The Enter between the second Escape and the slash text covers an edge
+    case where the input box is EMPTY: in that state, Escape Escape opens
+    CC's Rewind dialog instead of being a no-op. The subsequent slash text
+    would type into that dialog and a stray Enter could fire an actual
+    rewind. With "(current)" highlighted by default, Enter exits the dialog
+    without rewinding anything. If no Rewind dialog is open, Enter on an
+    empty input is a no-op (CC ignores empty submits), so this is safe in
+    the text-was-in-box case too.
+    """
     check = subprocess.run([TMUX_PATH, "has-session", "-t", TMUX_SESSION],
                            capture_output=True, text=True)
     if check.returncode != 0:
         return "no_session"
+    if pre_clear:
+        subprocess.run(
+            [TMUX_PATH, "send-keys", "-t", TMUX_SESSION, "Escape"],
+            capture_output=True, text=True, timeout=5)
+        time.sleep(0.4)
+        subprocess.run(
+            [TMUX_PATH, "send-keys", "-t", TMUX_SESSION, "Escape"],
+            capture_output=True, text=True, timeout=5)
+        time.sleep(0.4)
+        subprocess.run(
+            [TMUX_PATH, "send-keys", "-t", TMUX_SESSION, "Enter"],
+            capture_output=True, text=True, timeout=5)
+        time.sleep(0.5)
+    # Send text and Enter as two separate send-keys calls. The -l flag forces
+    # literal-text mode on the text send, so tmux does not try to parse any
+    # token in slash_cmd as a key name (matters for !refresh and !restore,
+    # where the payload is a multi-line <channel> block). The 0.5s gap gives
+    # CC time to process large pastes before Enter arrives.
     r = subprocess.run(
-        [TMUX_PATH, "send-keys", "-t", TMUX_SESSION, slash_cmd, "Enter"],
+        [TMUX_PATH, "send-keys", "-t", TMUX_SESSION, "-l", slash_cmd],
         capture_output=True, text=True, timeout=10)
-    if r.returncode == 0:
+    if r.returncode != 0:
+        return f"error: {r.stderr.strip()}"
+    time.sleep(0.5)
+    r2 = subprocess.run(
+        [TMUX_PATH, "send-keys", "-t", TMUX_SESSION, "Enter"],
+        capture_output=True, text=True, timeout=10)
+    if r2.returncode == 0:
         return "sent"
-    return f"error: {r.stderr.strip()}"
+    return f"error: {r2.stderr.strip()}"
 
 
 def inject_key(key_name):
@@ -304,7 +350,16 @@ def cmd_context():
         model_re = re.compile(r"(Opus|Sonnet|Haiku)\s+[\d.]+", re.IGNORECASE)
         pct_re = re.compile(r"(\d+)%\s*(\d+[KM])")
         model_line = ctx_line = ""
-        for idx, line in enumerate(lines):
+        # Scan from the bottom. CC's status line is always at the very bottom
+        # of the pane, but conversation echoes (e.g. an earlier script that
+        # printed "On Opus 4.7, ..." or any prose mention of "Sonnet N.N")
+        # can match the model regex too. Forward iteration with `break` would
+        # pick stale echoes; reverse iteration locks onto the live render.
+        # Bug fired when an above-status echo collided with the auto-mode
+        # subline directly below it to produce "context line not parseable:
+        # ... auto mode classifier" responses to !context.
+        for idx in range(len(lines) - 1, -1, -1):
+            line = lines[idx]
             if model_re.search(line):
                 model_line = line.strip()
                 if idx + 1 < len(lines):
@@ -685,7 +740,11 @@ def cmd_refresh(args=""):
             + f"Context restore from refresh '{label}': {brief[:2800]}"
             + '</channel>'
         )
-        inject_result = inject_slash_command(inject_msg)
+        # pre_clear=False: /reset above already gave us a fresh session with
+        # empty input. Skipping the Escape Escape Enter dance avoids a visible
+        # blip at the end of the refresh flow and removes the Rewind-dialog
+        # edge case (since Escape Escape on an empty input opens it).
+        inject_result = inject_slash_command(inject_msg, pre_clear=False)
         if inject_result != "sent":
             logging.error("inject_slash_command failed for refresh restore label=%s result=%s", label, inject_result)
             _inject_refresh_failure_notice(

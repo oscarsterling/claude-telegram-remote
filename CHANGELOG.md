@@ -1,5 +1,25 @@
 # Changelog
 
+## v3.3.0 - 2026-05-03
+
+Bundled bug fix and robustness improvements to two of the most-used code paths: the `!context` parser and the slash-command injector that backs every other command.
+
+### Fixed
+- **`!context` mis-parses when the pane holds a model name above the live status line.** `cmd_context` was iterating the captured tmux pane top-to-bottom and breaking at the FIRST line matching `(Opus|Sonnet|Haiku) N.N`. If anything above CC's live status block contained a model name (an earlier script echo, a prose mention in the conversation, a previous `!context` reply still in scrollback), the parser locked onto that line and read the line directly below it as the percentage row. The auto-mode subline that sits beneath the input prompt then produced the message `Opus 4.7 ... | context line not parseable: ...`. Reversed the iteration so the parser scans bottom-up: the LAST `Opus N.N` occurrence in the pane is always CC's live status line, since nothing CC renders below it contains a model name. Mirrors the `grep ... | tail -1` approach proven in the standalone status-line check. Output format on success is unchanged.
+
+### Improved
+- **`inject_slash_command` now pre-clears CC's input box before sending.** Adds an Escape, 0.4s, Escape, 0.4s, Enter, 0.5s sequence in front of every slash command. Drops CC out of any open picker or popup before the slash text lands. The 0.4s gap between the two escapes matters because CC's Ink-based input has a render cycle and faster pairs landed on stale frames in testing.
+- **Empty-input Rewind-dialog edge case handled.** When the input box is EMPTY at injection time, the Escape Escape pair opens CC's Rewind dialog (`Restore the code and/or conversation to the point before...`) instead of being a no-op. Without the new Enter step, the slash text would type into that dialog and a stray Enter could fire an actual rewind. With `(current)` highlighted by default, the new Enter exits the dialog without rewinding anything. If no Rewind dialog is open, Enter on an empty input is a no-op (CC ignores empty submits), so the step is safe in the text-was-in-box case too.
+- **Slash text and Enter are now sent as two separate `send-keys` calls** with a 0.5s gap. The text send uses `tmux send-keys -l` to force literal-text mode, so tmux cannot parse any token in the payload as a key name (matters for `!refresh` and `!restore`, where the payload is a multi-line `<channel>` block that may contain words like `Tab`, `Enter`, or `Escape` in body text). The gap gives CC time to process large pastes before Enter arrives.
+
+### Added
+- **`pre_clear=False` opt-out on `inject_slash_command`** for callers that know the input is already clean. `cmd_refresh` uses this on its post-`/reset` restore inject (the new session has an empty input by definition), avoiding a visible Escape blip at the end of the refresh flow and sidestepping the empty-input Rewind-dialog case.
+
+### Notes
+The `!context` fix is a backwards-compatible bug fix: same output format on success, just no longer mis-parses when the pane holds a prior model-name match above the live status line.
+
+The `inject_slash_command` change is a small behavior change but should be invisible in normal use of the built-in `!commands`. If you have custom commands that call `inject_slash_command` directly and rely on the prior single-`send-keys` behavior, pass `pre_clear=False` to skip the new pre-clear sequence and they will run the old fast path. Otherwise they pick up the new robustness for free.
+
 ## v3.2.3 - 2026-04-28
 
 Follow-up to v3.2.2: the new defense-in-depth check itself had a bug. The substring match `"No saved context found" in brief` fired against a HEALTHY restore whose body legitimately quoted that string in commentary about a previously-fixed bug, injecting a false-positive `restore-mismatch` failure notice over real restored context.

@@ -1,6 +1,6 @@
 # claude-telegram-remote
 
-**v3.2.3** (April 28, 2026). Control Claude Code from your phone via Telegram. 23 commands, interactive checkpoint rollback, session save/restore/refresh, a typing indicator, a deterministic Stop-hook, and inline button pickers.
+**v3.3.0** (May 3, 2026). Control Claude Code from your phone via Telegram. 23 commands, interactive checkpoint rollback, session save/restore/refresh, a typing indicator, a deterministic Stop-hook, and inline button pickers.
 
 ![Hero](assets/hero.png)
 
@@ -11,6 +11,11 @@ A set of scripts and configurations that give you full remote control of Claude 
 **[Read the full story on Clelp.ai](https://clelp.ai/blog/claude-telegram-remote-control)**
 
 ## Version History
+
+### v3.3
+
+- **`!context` no longer mis-parses when the pane holds a prior model-name match.** Previously, any earlier mention of `Opus N.N` / `Sonnet N.N` / `Haiku N.N` above CC's live status block (an earlier script echo, a prose mention in the conversation, a previous `!context` reply still in scrollback) would win the parser's first-match scan, and the parser would then read the line directly below it as the percentage row. The auto-mode subline produced the message `context line not parseable: ...`. The parser now scans bottom-up so the LAST match wins; the live status line is always last.
+- **`inject_slash_command` pre-clears the CC input box before sending.** Adds an Escape, Escape, Enter sequence (with 0.4s and 0.5s gaps) in front of every slash command to drop CC out of any open picker or popup, including the Rewind dialog that opens when the input is empty and Escape Escape lands there. Slash text and Enter are now sent as two separate `send-keys` calls with a 0.5s gap, using `tmux send-keys -l` for literal-text mode so tmux cannot parse tokens in the payload as key names. Callers can opt out via `pre_clear=False` (used in `cmd_refresh`'s post-`/reset` restore inject).
 
 ### v3.2
 

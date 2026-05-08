@@ -1,6 +1,6 @@
 # claude-telegram-remote
 
-**v3.3.0** (May 3, 2026). Control Claude Code from your phone via Telegram. 23 commands, interactive checkpoint rollback, session save/restore/refresh, a typing indicator, a deterministic Stop-hook, and inline button pickers.
+**v3.4.0** (May 8, 2026). Control Claude Code from your phone via Telegram. 23 commands, interactive checkpoint rollback, session save/restore/refresh, a typing indicator, a deterministic Stop-hook, and inline button pickers.
 
 ![Hero](assets/hero.png)
 
@@ -11,6 +11,10 @@ A set of scripts and configurations that give you full remote control of Claude 
 **[Read the full story on Clelp.ai](https://clelp.ai/blog/claude-telegram-remote-control)**
 
 ## Version History
+
+### v3.4
+
+- **Optional refuse-launch patch for the Telegram MCP plugin.** Under `advanced/refuse-launch-patch/`, an idempotent script that patches `telegram@claude-plugins-official`'s `server.ts` to refuse launching when its parent chain belongs to Claude Desktop. Mitigates a thrash bug where Desktop's agent-mode sub-claudes (Computer Use, Skills, ccd_session, Claude in Chrome, etc.) inherit the global plugin cache, spawn their own `bun server.ts`, and SIGTERM the bun owned by your legitimate Code session. Symptoms without this patch: Telegram bot suddenly stops replying mid-session, multiple bun processes cycling every few minutes, extended Telegram silence followed by self-recovery once Desktop sub-claudes shut down. The Customize panel toggle is not a durable lever (Desktop has been observed re-enabling it across restarts even when `~/.claude/settings.json` correctly reads `enabledPlugins: false`). Ships with `--check` and `--dry-run` modes; self-contained so it stacks cleanly with `reply-context-patch` or runs on its own. Root cause documented at [anthropics/claude-code#43645](https://github.com/anthropics/claude-code/issues/43645).
 
 ### v3.3
 

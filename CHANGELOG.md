@@ -1,5 +1,22 @@
 # Changelog
 
+## v3.4.0 - 2026-05-08
+
+New optional plugin patch addressing a thrash bug between Claude Code's `telegram@claude-plugins-official` plugin and Claude Desktop's agent-mode features.
+
+### Added
+- **`advanced/refuse-launch-patch/` — refuse-launch-from-agent-mode-sessions patch.** Idempotent patch that walks `server.ts`'s parent process chain at startup (depth-cap 12). If any ancestor's command line contains `local-agent-mode-sessions` OR `Claude.app`, the bun was launched by Claude Desktop and exits cleanly with code 0 BEFORE the upstream "replacing stale poller" path can SIGTERM the bun owned by your Code session. Logs every check (pass, refuse, ps-error) to `~/.claude/channels/telegram/server.log` so you can audit the decisions. Self-contained — does NOT depend on `reply-context-patch`; sentinels and anchors are disjoint so they stack cleanly when both are installed.
+
+### Why this patch exists
+Claude Desktop's agent-mode features (Computer Use, Skills, ccd_session, Claude in Chrome, etc.) spawn CLI sub-claudes via `~/Library/Application Support/Claude/local-agent-mode-sessions/...` that inherit the FULL plugin-dir set from `~/.claude/plugins/cache/`. Whenever the telegram plugin is in your global cache (which it is whenever your Code session uses it), every Desktop sub-claude that fires loads the plugin and spawns its own `bun server.ts`. Each new bun then SIGTERMs the previous one via the upstream stale-poller path, severing your Code session's MCP connection in the process. Symptoms: Telegram bot suddenly stops replying mid-session, multiple bun processes cycling every few minutes when Desktop is running, extended Telegram silence (60+ minutes) followed by self-recovery. The Customize panel toggle is not a durable lever — Desktop has been observed re-enabling the plugin across restarts even when `~/.claude/settings.json` correctly stores `enabledPlugins: false`. Root cause is [anthropics/claude-code#43645](https://github.com/anthropics/claude-code/issues/43645).
+
+### Notes
+- Apply with `python3 advanced/refuse-launch-patch/apply.py`. After applying, run `/reset` in Claude Code so bun reloads `server.ts`. Do NOT kill bun mid-session — that permanently disconnects the Telegram MCP channel until the next session start.
+- Verify the patch is firing by tailing `~/.claude/channels/telegram/server.log` for `refuse-launch check-passed chain-depth=N` lines on legitimate spawns and `refuse-launch reason=...` lines on Desktop sub-claude attempts.
+- Plugin auto-upgrades wipe local patches silently. Re-run `apply.py` after every plugin version bump. The script is idempotent (sentinel check), so it's safe to add to a daily cron / shell-rc helper.
+
+---
+
 ## v3.3.0 - 2026-05-03
 
 Bundled bug fix and robustness improvements to two of the most-used code paths: the `!context` parser and the slash-command injector that backs every other command.

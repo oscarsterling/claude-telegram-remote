@@ -1,6 +1,6 @@
 # claude-telegram-remote
 
-**v3.4.0** (May 8, 2026). Control Claude Code from your phone via Telegram. 23 commands, interactive checkpoint rollback, session save/restore/refresh, a typing indicator, a deterministic Stop-hook, and inline button pickers.
+**v3.5.0** (May 15, 2026). Control Claude Code from your phone via Telegram. 23 commands, interactive checkpoint rollback, session save/restore/refresh, a typing indicator, a hardened deterministic Stop-hook, and inline button pickers.
 
 ![Hero](assets/hero.png)
 
@@ -11,6 +11,15 @@ A set of scripts and configurations that give you full remote control of Claude 
 **[Read the full story on Clelp.ai](https://clelp.ai/blog/claude-telegram-remote-control)**
 
 ## Version History
+
+### v3.5
+
+- **Stop hook hardened against pre-reply and between-reply terminal leaks.** The deterministic Stop hook from v2 caught two failure modes (no reply at all, trailing text after the last reply) but it never noticed when the agent wrote a status sentence BEFORE the first reply tool call or BETWEEN two reply calls. That "On it, let me read the file..." narration is invisible to you on Telegram, and as long as the agent eventually called the reply tool, the hook passed. v3.5 closes that gap: every text content block in a Telegram-triggered turn must be a normalized substring of some reply or edit_message payload, or the hook blocks with the leaked snippet quoted back to the model. Normalization only touches line endings and outer whitespace so real mismatches still get caught.
+- **Errored-delivery detection.** Same hook: previously it counted a reply tool CALL, not a successful tool_result. If the reply tool returned an error (`is_error: true`, or content starting with "Error:"), the hook used to pass even though nothing reached your phone. v3.5 checks the matching tool_result and blocks on error with the failure excerpt. Conservative heuristic by design (false negatives tolerable, false-positive blocks on a successful reply that happens to mention "error" are not).
+- **Layer 2 rewake-counter safety net** carried forward from the May 13 hot patch. If the hook keeps blocking without convergence, force-release at 4 consecutive blocks within 60 seconds and append a JSONL event to the loop-event log. Prevents loop-death scenarios.
+- **Portable state paths.** State (rewake counter, loop event log, debug logs) lives under `~/claude-telegram-remote/state/` by default. Override individually via `TG_HOOK_REWAKE_COUNTER_PATH`, `TG_HOOK_LOOP_EVENT_LOG_PATH`, `TG_HOOK_DEBUG_LOG_DIR`.
+- **25 tests** in `hooks/test-check-tg-reply-completeness.py` including the four block-condition stderr-distinctness invariants, pre-reply leak detection, edit_message-payload leak coverage, CRLF normalization, errored-delivery detection, and the Layer 2 force-release at N=4.
+- Design locked via GPT-5.5 model bounce: block over auto-relay, suppress pre-tool announcements rather than duplicate, normalize only line endings + outer whitespace.
 
 ### v3.4
 
@@ -288,9 +297,11 @@ claude-telegram-remote/
 
 **Typing pinger.** When a Telegram message arrives, `start-typing-pinger.sh` extracts the chat_id from the inbound channel tag and spawns `typing-indicator-pinger.py` as a detached process. The pinger loops `sendChatAction(typing)` every 4 seconds (Telegram clears typing after ~5s, so this keeps it lit). It dies in three ways: PostToolUse on the reply tool, the Stop hook backstop, or the hard 10-minute ceiling.
 
-**Stop hook.** A deterministic Python script that walks the JSONL transcript backwards to the most recent real user prompt, then checks two conditions:
+**Stop hook.** A deterministic Python script that walks the JSONL transcript backwards to the most recent real user prompt, then checks four conditions:
 1. If a Telegram channel tag was in the prompt and no `mcp__plugin_telegram_telegram__reply` tool was called, BLOCK with "missing TG reply"
 2. If a reply was called AND there is text either after it in the transcript OR in the in-flight `last_assistant_message` payload, BLOCK with "trailing terminal text after TG reply"
+3. (v3.5) If any text content block in the turn is NOT a normalized substring of some reply or edit_message payload, BLOCK with "invisible terminal text" and the leaked snippet quoted in stderr. Catches the pre-reply and between-reply leaks v2 missed
+4. (v3.5) If the reply tool was called but its `tool_result` came back as an error (`is_error: true`, or content starting with "Error:"), BLOCK with the failure excerpt. Tool-use existence is not the same as successful delivery
 
 The trailing-text check uses both the persisted transcript AND the stdin payload because the Stop hook fires before the final assistant text is flushed to JSONL. Without that cross-check, trailing text after the final reply slips through invisible.
 

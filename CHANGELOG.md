@@ -1,17 +1,46 @@
 # Changelog
 
+## v3.5.0 - 2026-05-15
+
+Stop-hook hardening release. The deterministic Stop hook from v2.0.0 caught two failure modes but missed two others. This release closes both gaps, ports the Layer 2 rewake-counter safety net from the May 13 hot patch, and makes all hook state portable.
+
+### Added
+
+- **Pre-reply and between-reply terminal-text leak detection.** Every assistant text content block in a Telegram-triggered turn must be a normalized substring of some `mcp__plugin_telegram_telegram__reply` or `mcp__plugin_telegram_telegram__edit_message` payload. If a text block was emitted before the first reply call (the classic "On it, let me read the file..." narration) or between two reply calls, and its content does not appear in any Telegram-bound payload, the hook now BLOCKS with the leaked snippet quoted in stderr. Normalization touches only line endings (`\r\n` -> `\n`) and outer whitespace; inner whitespace and markdown stay raw so real mismatches still get caught. Empty or whitespace-only text blocks are ignored.
+- **Errored-delivery detection.** The TG-inbound-requires-reply rule used to count a tool_use, not a successful tool_result. A reply call that returned an error result still passed the hook even though nothing actually shipped. The hook now matches the last reply tool_use to its tool_result by `tool_use_id` and BLOCKS if the result carries `is_error: true`, a dict content with an `error` key, or a string starting with "Error:". Conservative heuristic by design: false negatives tolerable, false-positive blocks on a successful reply that happens to mention the word "error" in its payload are not.
+- **Layer 2 rewake-counter loop break** (ported from May 13). If the hook keeps blocking without convergence, force-release at the 4th consecutive block within 60 seconds (exit 0 instead of exit 2) and append a JSONL event to a loop-event log. Prevents loop-death incidents like the May 13 one where an exit-2 with empty stderr made the agent re-read the rewake as "ack the user" and loop indefinitely.
+- **Portable state paths.** State now lives under `~/claude-telegram-remote/state/` by default. Override individually via env vars: `TG_HOOK_REWAKE_COUNTER_PATH`, `TG_HOOK_LOOP_EVENT_LOG_PATH`, `TG_HOOK_DEBUG_LOG_DIR`.
+- **Test suite expanded to 25 cases** in `hooks/test-check-tg-reply-completeness.py`: pre-reply leak, between-reply leak, edit_message payload coverage, CRLF normalization, edit-only turn still blocks on missing-reply, errored-delivery, missing tool_result passes defensively, rewake counter resets on pass and on time gap and force-releases on 4th block, plus the existing distinctness invariants for all four block conditions.
+
+### Improved
+
+- **All four block conditions produce distinct, actionable stderr.** Each surfaces a different remediation directive so the model can tell them apart in the rewake reminder. The "invisible terminal text" message names the leaked sentence (first 120 chars) so the model knows exactly which content to relocate into the next reply payload.
+- **Silent exit-2 is banned by construction.** `decide()` returns `(code, message)` and `main()` refuses to print an empty message on a code == 2 path. The May 13 loop-death root cause cannot recur.
+- **Hook docstring updated** to describe all four block conditions, the rewake counter, and the env-var overrides.
+
+### Design notes
+
+The hardening design was bounced against GPT-5.5 before implementation. Four decisions came out of that:
+
+1. Block over auto-relay. Auto-relaying leaked text risks shipping stale "On it..." status after the work has completed, or accidentally leaking refusal fragments. Block + retry is the correct UX.
+2. Suppress pre-tool announcements rather than duplicate them into the reply payload. Duplicating produces stale narration in the final reply.
+3. Normalize only line endings and outer whitespace. Aggressive markdown or inner-whitespace normalization hides real mismatches.
+4. Keep rewake-counter threshold at N=3 within 60s. Raising it brings back loop-death risk.
+
+The errored-delivery hole was a real failure mode the original spec missed and the bounce caught.
+
 ## v3.4.0 - 2026-05-08
 
 New optional plugin patch addressing a thrash bug between Claude Code's `telegram@claude-plugins-official` plugin and Claude Desktop's agent-mode features.
 
 ### Added
-- **`advanced/refuse-launch-patch/` — refuse-launch-from-agent-mode-sessions patch.** Idempotent patch that walks `server.ts`'s parent process chain at startup (depth-cap 12). If any ancestor's command line contains `local-agent-mode-sessions` OR `Claude.app`, the bun was launched by Claude Desktop and exits cleanly with code 0 BEFORE the upstream "replacing stale poller" path can SIGTERM the bun owned by your Code session. Logs every check (pass, refuse, ps-error) to `~/.claude/channels/telegram/server.log` so you can audit the decisions. Self-contained — does NOT depend on `reply-context-patch`; sentinels and anchors are disjoint so they stack cleanly when both are installed.
+- **`advanced/refuse-launch-patch/` refuse-launch-from-agent-mode-sessions patch.** Idempotent patch that walks `server.ts`'s parent process chain at startup (depth-cap 12). If any ancestor's command line contains `local-agent-mode-sessions` OR `Claude.app`, the bun was launched by Claude Desktop and exits cleanly with code 0 BEFORE the upstream "replacing stale poller" path can SIGTERM the bun owned by your Code session. Logs every check (pass, refuse, ps-error) to `~/.claude/channels/telegram/server.log` so you can audit the decisions. Self-contained, does NOT depend on `reply-context-patch`; sentinels and anchors are disjoint so they stack cleanly when both are installed.
 
 ### Why this patch exists
-Claude Desktop's agent-mode features (Computer Use, Skills, ccd_session, Claude in Chrome, etc.) spawn CLI sub-claudes via `~/Library/Application Support/Claude/local-agent-mode-sessions/...` that inherit the FULL plugin-dir set from `~/.claude/plugins/cache/`. Whenever the telegram plugin is in your global cache (which it is whenever your Code session uses it), every Desktop sub-claude that fires loads the plugin and spawns its own `bun server.ts`. Each new bun then SIGTERMs the previous one via the upstream stale-poller path, severing your Code session's MCP connection in the process. Symptoms: Telegram bot suddenly stops replying mid-session, multiple bun processes cycling every few minutes when Desktop is running, extended Telegram silence (60+ minutes) followed by self-recovery. The Customize panel toggle is not a durable lever — Desktop has been observed re-enabling the plugin across restarts even when `~/.claude/settings.json` correctly stores `enabledPlugins: false`. Root cause is [anthropics/claude-code#43645](https://github.com/anthropics/claude-code/issues/43645).
+Claude Desktop's agent-mode features (Computer Use, Skills, ccd_session, Claude in Chrome, etc.) spawn CLI sub-claudes via `~/Library/Application Support/Claude/local-agent-mode-sessions/...` that inherit the FULL plugin-dir set from `~/.claude/plugins/cache/`. Whenever the telegram plugin is in your global cache (which it is whenever your Code session uses it), every Desktop sub-claude that fires loads the plugin and spawns its own `bun server.ts`. Each new bun then SIGTERMs the previous one via the upstream stale-poller path, severing your Code session's MCP connection in the process. Symptoms: Telegram bot suddenly stops replying mid-session, multiple bun processes cycling every few minutes when Desktop is running, extended Telegram silence (60+ minutes) followed by self-recovery. The Customize panel toggle is not a durable lever, Desktop has been observed re-enabling the plugin across restarts even when `~/.claude/settings.json` correctly stores `enabledPlugins: false`. Root cause is [anthropics/claude-code#43645](https://github.com/anthropics/claude-code/issues/43645).
 
 ### Notes
-- Apply with `python3 advanced/refuse-launch-patch/apply.py`. After applying, run `/reset` in Claude Code so bun reloads `server.ts`. Do NOT kill bun mid-session — that permanently disconnects the Telegram MCP channel until the next session start.
+- Apply with `python3 advanced/refuse-launch-patch/apply.py`. After applying, run `/reset` in Claude Code so bun reloads `server.ts`. Do NOT kill bun mid-session, that permanently disconnects the Telegram MCP channel until the next session start.
 - Verify the patch is firing by tailing `~/.claude/channels/telegram/server.log` for `refuse-launch check-passed chain-depth=N` lines on legitimate spawns and `refuse-launch reason=...` lines on Desktop sub-claude attempts.
 - Plugin auto-upgrades wipe local patches silently. Re-run `apply.py` after every plugin version bump. The script is idempotent (sentinel check), so it's safe to add to a daily cron / shell-rc helper.
 

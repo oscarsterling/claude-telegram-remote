@@ -1,3 +1,6 @@
+> **This project has moved.** It now lives in the Clelp Skills monorepo:
+> https://github.com/oscarsterling/clelp-skills/tree/main/claude-telegram-remote
+
 # claude-telegram-remote
 
 **v3.5.0** (May 15, 2026). Control Claude Code from your phone via Telegram. 23 commands, interactive checkpoint rollback, session save/restore/refresh, a typing indicator, a hardened deterministic Stop-hook, and inline button pickers.
